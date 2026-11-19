@@ -13,8 +13,14 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "DE RIDE | Move with confidence",
-  description: "Find verified park departures and book intercity rides across Lagos and Ogun with DE RIDE.",
+  title: "DE RIDE | Intercity rides, with more certainty",
+  description: "Explore verified park departures, transparent fares and available seats for intercity routes across Lagos and Ogun.",
+  openGraph: {
+    title: "DE RIDE | Move with confidence",
+    description: "Find your park. Catch your ride. Get there with confidence.",
+    images: ["https://hebbkx1anhila5yf.public.blob.vercel-storage.com/1794927085562-Kifc0QDotO89kvkek32R7QrEWNaGvX.jpg"],
+    type: "website",
+  },
   applicationName: "DE RIDE",
 };
 

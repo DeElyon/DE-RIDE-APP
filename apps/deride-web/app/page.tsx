@@ -1,5 +1,5 @@
-import DerideApp from "@/components/deride-app";
+import MarketingHome from "@/Marketing/marketing-home";
 
 export default function Home() {
-  return <DerideApp />;
+  return <MarketingHome />;
 }
