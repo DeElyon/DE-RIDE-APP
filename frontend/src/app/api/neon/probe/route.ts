@@ -1,6 +1,6 @@
 import { neon } from '@neondatabase/serverless';
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
-import { createRemoteJWKSet, jwtVerify } from 'jose';
+import { jwtVerify } from 'jose';
 import { createRealtime, rawSql } from '@neon/realtime/server';
 
 export const runtime = 'nodejs';
@@ -10,10 +10,9 @@ type Service = 'postgres' | 'ai-gateway' | 'object-storage' | 'functions' | 'rea
 
 async function requireUser(request: Request) {
   const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
-  const jwksUrl = process.env.NEON_AUTH_JWKS_URL;
-  if (!token || !jwksUrl) throw new Error('Authentication is not configured');
-  const jwks = createRemoteJWKSet(new URL(jwksUrl));
-  await jwtVerify(token, jwks);
+  const secret = process.env.JWT_ACCESS_SECRET;
+  if (!token || !secret || secret.length < 32) throw new Error('Authentication is not configured');
+  await jwtVerify(token, new TextEncoder().encode(secret), { algorithms: ['HS256'] });
 }
 
 function databaseName() {

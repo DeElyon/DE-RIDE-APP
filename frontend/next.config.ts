@@ -11,9 +11,5 @@ if (envFile) loadDotenv({ path: envFile, override: false });
 
 const config: NextConfig = {
   reactStrictMode: true,
-  env: {
-    NEXT_PUBLIC_NEON_AUTH_BASE_URL: process.env.NEON_AUTH_BASE_URL,
-    NEXT_PUBLIC_NEON_REALTIME_URL: process.env.NEON_REALTIME_URL,
-  },
 };
 export default config;

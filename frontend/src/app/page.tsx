@@ -1,70 +1,85 @@
 'use client';
 
-const portals = [
-  { name: 'Passenger', detail: 'Find parks, book seats and keep your tickets close.', href: '/passenger/explore', icon: '↗', accent: 'coral', tag: 'TRAVELER' },
-  { name: 'Bus driver', detail: 'Manage your trip, boarding and passenger manifest.', href: '/driver/dashboard', icon: '▰', accent: 'teal', tag: 'BUS & ROUTE' },
-  { name: 'Biker', detail: 'See passenger requests and manage active rides.', href: '/biker/radar', icon: '⌁', accent: 'mint', tag: 'LAST MILE' },
-  { name: 'Dispatch rider', detail: 'Manage parcel deliveries and proof of handoff.', href: '/dispatch-rider/deliveries', icon: '▱', accent: 'amber', tag: 'DELIVERY' },
-  { name: 'Park operator', detail: 'Coordinate terminal bays, queues and departures.', href: '/park-operator/terminal', icon: '▦', accent: 'teal', tag: 'TERMINAL' },
-  { name: 'Admin', detail: 'Open the restricted DE RIDE operations workspace.', href: '/admin/command-map', icon: '⌖', accent: 'coral', tag: 'OPERATIONS' },
-];
+import { useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
+import { APIProvider, Map, AdvancedMarker } from '@vis.gl/react-google-maps';
+import { ArrowDown, ArrowRight, ArrowUpRight, Bike, BusFront, Check, ChevronDown, Clock3, Headphones, MapPin, Menu, Mic2, Package, Play, Radio, ShieldCheck, Smartphone, Speaker, Users, Wallet, X } from 'lucide-react';
+import { RoleShowcaseTabs } from '@/components/landing/RoleShowcaseTabs';
+import { FareRefundSimulator } from '@/components/landing/FareRefundSimulator';
 
-const launchHubs = ['Lagos', 'Ogun'];
+type Park = { id: string; name: string; park_name?: string; state_code?: string; latitude?: number; longitude?: number };
+const languages = ['EN', 'YO', 'HA', 'IG', 'PCM'] as const;
+const langSpeech: Record<string, string> = { EN: 'en-NG', YO: 'yo-NG', HA: 'ha-NG', IG: 'ig-NG', PCM: 'en-NG' };
+const states = ['Lagos State', 'Ogun State', 'Abuja FCT', 'Abia', 'Adamawa', 'Akwa Ibom', 'Anambra', 'Bauchi', 'Bayelsa', 'Benue', 'Borno', 'Cross River', 'Delta', 'Ebonyi', 'Edo', 'Ekiti', 'Enugu', 'Gombe', 'Imo', 'Jigawa', 'Kaduna', 'Kano', 'Katsina', 'Kebbi', 'Kogi', 'Kwara', 'Nasarawa', 'Niger', 'Ondo', 'Osun', 'Oyo', 'Plateau', 'Rivers', 'Sokoto', 'Taraba', 'Yobe', 'Zamfara'];
+const points = [{ name: 'Berger Terminal', state: 'Lagos', lat: 6.6147, lng: 3.3568 }, { name: 'Ojota New Garage', state: 'Lagos', lat: 6.5903, lng: 3.384 }, { name: 'Jibowu', state: 'Lagos', lat: 6.524, lng: 3.369 }, { name: 'Kuto Park Abeokuta', state: 'Ogun', lat: 7.1475, lng: 3.3619 }, { name: 'Sagamu Interchange', state: 'Ogun', lat: 6.841, lng: 3.645 }];
 
 export default function Home() {
-  function readPageAloud() {
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+  const [language, setLanguage] = useState<(typeof languages)[number]>('EN');
+  const [parks, setParks] = useState<Park[]>([]);
+  const [state, setState] = useState('All 36 States + FCT');
+  const [origin, setOrigin] = useState('');
+  const [destination, setDestination] = useState('');
+  const [summary, setSummary] = useState<Record<string, number | string>>({});
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [installEvent, setInstallEvent] = useState<Event | null>(null);
+
+  useEffect(() => {
+    const base = process.env.NEXT_PUBLIC_API_URL ?? '';
+    fetch(`${base}/api/v1/parks`).then(r => r.ok ? r.json() : null).then(d => setParks(d?.parks ?? [])).catch(() => setParks([]));
+    fetch(`${base}/api/v1/parks/summary`).then(r => r.ok ? r.json() : null).then(d => { if (d) setSummary(d); }).catch(() => undefined);
+    const onInstall = (event: Event) => { event.preventDefault(); setInstallEvent(event); };
+    window.addEventListener('beforeinstallprompt', onInstall);
+    return () => window.removeEventListener('beforeinstallprompt', onInstall);
+  }, []);
+
+  const parkNames = useMemo(() => [...new Set([...points.map(p => p.name), ...parks.map(p => p.name ?? p.park_name ?? '').filter(Boolean)])], [parks]);
+  function speak(text: string) {
+    if (!('speechSynthesis' in window)) return;
     window.speechSynthesis.cancel();
-    const speech = new SpeechSynthesisUtterance('Your next move starts here. One place for bus travel, bike rides and parcel dispatch. Choose your workspace to get started.');
-    const language = (document.querySelector('select[aria-label="Choose language"]') as HTMLSelectElement | null)?.value ?? 'EN';
-    speech.lang = ({ EN: 'en-NG', YO: 'yo-NG', HA: 'ha-NG', IG: 'ig-NG', PCM: 'en-NG' } as Record<string, string>)[language] ?? 'en-NG';
-    window.speechSynthesis.speak(speech);
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = langSpeech[language];
+    window.speechSynthesis.speak(utterance);
+  }
+  async function install() {
+    const prompt = installEvent as (Event & { prompt?: () => Promise<void> }) | null;
+    if (prompt?.prompt) { await prompt.prompt(); setInstallEvent(null); }
   }
 
-  return (
-    <main className="home-shell">
-      <header className="topbar">
-        <a className="brand" href="/" aria-label="DE RIDE home">
-          <span className="brand-mark" aria-hidden="true">D</span>
-          <span>DE <b>RIDE</b><small>MOVE WITH CONFIDENCE</small></span>
-        </a>
-        <div className="top-actions">
-          <label className="language-picker"><span className="sr-only">Language</span><select defaultValue="EN" aria-label="Choose language"><option>EN</option><option>YO</option><option>HA</option><option>IG</option><option>PCM</option></select></label>
-          <button className="voice-button" type="button" onClick={readPageAloud} aria-label="Read page aloud" title="Read page aloud">◖))</button>
-          <a className="sign-in-link" href="/login">Sign in <span aria-hidden="true">→</span></a>
-        </div>
-      </header>
+  return <main className="landing">
+    <header className="landing-nav"><Link href="/" className="landing-brand" aria-label="DE RIDE home"><span className="brand-emblem"><svg viewBox="0 0 40 40" role="img" aria-label="DE RIDE emblem"><path d="M7 5h12c9 0 15 6 15 15S28 35 19 35H7V5Zm8 7v16h4c4 0 7-3 7-8s-3-8-7-8h-4Z" fill="currentColor"/><path d="M10 20h16" stroke="#F46A6A" strokeWidth="2"/></svg></span><span className="wordmark"><b>DE</b> <i>RIDE</i><small>MOVE WITH CONFIDENCE</small></span></Link>
+      <nav className={`nav-links ${mobileOpen ? 'nav-open' : ''}`}><a href="#live-parks">Live Parks</a><a href="#how-it-works">How It Works</a><a href="#portals">6 Portals</a><a href="#pricing">Pricing &amp; Ranks</a><a href="#amebo">Amebo AI</a><a href="#data">Buy Data</a></nav>
+      <div className="nav-actions"><label className="language-pill"><span className="sr-only">Read-aloud language</span><select value={language} onChange={e => setLanguage(e.target.value as typeof language)}>{languages.map(lang => <option key={lang}>{lang}</option>)}</select><button title="Read the page aloud" aria-label="Read page aloud" onClick={() => speak('Welcome to DE RIDE. See live parks, book a seat, and move smarter across Nigeria.')}><Speaker size={17}/></button></label><Link className="nav-login" href="/login">Log In</Link><Link className="cta small-cta" href="/login">Get Started Free <ArrowRight size={16}/></Link><button className="mobile-toggle" aria-label="Toggle navigation" onClick={() => setMobileOpen(!mobileOpen)}>{mobileOpen ? <X/> : <Menu/>}</button></div>
+    </header>
 
-      <section className="hero" aria-labelledby="hero-title">
-        <div className="hero-copy">
-          <div className="eyebrow"><span className="eyebrow-dot" /> NIGERIA, ON THE MOVE</div>
-          <h1 id="hero-title">Your next move<br /><span>starts here.</span></h1>
-          <p>One place for bus travel, bike rides and parcel dispatch. Choose your workspace to get started.</p>
-          <div className="hero-actions"><a className="button-primary" href="/passenger/explore">Explore DE RIDE <span>↗</span></a><a className="text-link" href="/login">Already have an account?</a></div>
-          <div className="hub-note"><span className="hub-icon">⌖</span><span><b>Launching in Lagos &amp; Ogun</b><small>Built for journeys across all 36 states and the FCT</small></span></div>
-        </div>
-        <div className="route-art" aria-label="Illustration of a connected route across Nigeria">
-          <div className="route-orbit orbit-one" /><div className="route-orbit orbit-two" />
-          <div className="route-line" />
-          <span className="map-pin pin-lagos"><i />LAGOS</span><span className="map-pin pin-ogun"><i />OGUN</span>
-          <div className="route-center"><span className="route-center-icon">↗</span><b>GO YOUR WAY</b><small>One ride at a time</small></div>
-          <span className="route-coordinate">06° 27′ N<br />03° 23′ E</span>
-          <span className="route-label">YOUR CITY. YOUR JOURNEY.</span>
-        </div>
-      </section>
+    <section className="hero-section" id="how-it-works"><div className="hero-grid"><div className="hero-copy"><div className="eyebrow"><span className="pulse-dot"/> NIGERIA IS MOVING · LIVE PARK NETWORK</div><h1>Stop waiting hours at the motor park.<br/><em>See live seats, book ahead &amp; move smarter.</em></h1><p className="hero-sub">Real-time bus visibility across Ogun, Lagos &amp; all 36 states + FCT—with offline QR tickets, last-mile bikes, dispatch riders, Amebo AI, and affordable data.</p>
+        <form className="route-search" onSubmit={e => { e.preventDefault(); document.querySelector('#live-parks')?.scrollIntoView({ behavior: 'smooth' }); }}><div className="route-search-title"><MapPin size={17}/> Find your next ride <span>LIVE ROUTES</span></div><div className="route-fields"><label><span>STATE</span><select value={state} onChange={e => setState(e.target.value)}><option>All 36 States + FCT</option>{states.map(s => <option key={s}>{s}</option>)}</select><ChevronDown size={15}/></label><label><span>FROM PARK</span><input list="park-options" placeholder="Choose origin park" value={origin} onChange={e => setOrigin(e.target.value)}/><datalist id="park-options">{parkNames.map(n => <option key={n} value={n}/>)}</datalist></label><label><span>TO DESTINATION</span><input placeholder="City or park" value={destination} onChange={e => setDestination(e.target.value)}/></label><button className="cta search-cta" type="submit">Find Live Buses <ArrowRight size={17}/></button></div><div className="quick-routes"><span>Popular:</span><button type="button" onClick={() => {setOrigin('Berger Terminal');setDestination('Kuto Park Abeokuta')}}>Berger → Abeokuta</button><button type="button" onClick={() => {setOrigin('Ojota New Garage');setDestination('Sagamu Interchange')}}>Ojota → Sagamu</button></div></form>
+        <div className="hero-trust"><span><ShieldCheck size={17}/> Verified park partners</span><span><Smartphone size={17}/> Offline-ready tickets</span><span><Radio size={17}/> Live trip updates</span></div>
+      </div><div className="live-preview"><div className="preview-head"><div><span className="live-pill"><i/> LIVE PREVIEW</span><h3>Lagos → Abeokuta</h3><p>Berger Terminal · Ogun State</p></div><button aria-label="Listen to route summary" onClick={() => speak('A bus to Abeokuta is boarding at Berger Terminal. Eleven of fourteen seats are filled.')}><Headphones size={18}/></button></div><div className="map-panel">{process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ? <APIProvider apiKey={process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY}><Map defaultCenter={{lat:6.78,lng:3.53}} defaultZoom={8} gestureHandling="cooperative" disableDefaultUI mapId={process.env.NEXT_PUBLIC_GOOGLE_MAP_ID}><AdvancedMarker position={{lat:6.6147,lng:3.3568}} title="Berger Terminal"><span className="map-marker"><BusFront size={17}/></span></AdvancedMarker><AdvancedMarker position={{lat:7.1475,lng:3.3619}} title="Kuto Park Abeokuta"><span className="map-marker"><MapPin size={16}/></span></AdvancedMarker></Map></APIProvider> : <div className="map-fallback"><div className="map-grid-lines"/><div className="route-path"/><span className="map-label label-berger"><i/>BERGER TERMINAL</span><span className="map-label label-kuto"><i/>KUTO PARK · ABEOKUTA</span><span className="telemetry"><Radio size={13}/> Driver App GPS</span><span className="map-scale">LAGOS ↗ OGUN</span></div>}</div><div className="boarding-card"><div className="bus-avatar"><BusFront size={20}/></div><div className="boarding-main"><b>Ogun Express <span><Check size={12}/> Verified</span></b><small>Leaves in <strong>18 min</strong> · Air conditioned</small><div className="seat-progress"><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span className="empty"/><span className="empty"/><span className="empty"/></div><small>11/14 seats · <i>3 seats left</i></small></div><div className="boarding-lock"><Clock3 size={13}/> 120s<br/><small>lock</small></div></div><div className="telemetry-legend"><span><Radio size={13}/> Hardware GPS</span><span><Smartphone size={13}/> Driver App GPS</span><span><span className="legend-dot"/> Park Manual</span></div></div></div></section>
 
-      <section className="portal-section" aria-labelledby="portal-title">
-        <div className="section-heading"><div><div className="eyebrow muted-eyebrow">ONE PLATFORM · SIX WORKSPACES</div><h2 id="portal-title">Where are you headed?</h2></div><span className="section-aside">Choose a workspace <span aria-hidden="true">↓</span></span></div>
-        <div className="portal-grid">
-          {portals.map((portal, index) => <a className={`portal-card accent-${portal.accent}`} href={portal.href} key={portal.href}>
-            <div className="portal-card-top"><span className="portal-icon" aria-hidden="true">{portal.icon}</span><span className="portal-index">0{index + 1}</span></div>
-            <span className="portal-tag">{portal.tag}</span><h3>{portal.name}</h3><p>{portal.detail}</p>
-            <span className="portal-arrow" aria-hidden="true">↗</span>
-          </a>)}
-        </div>
-      </section>
+    <section className="ticker" id="live-parks"><div className="ticker-label"><span className="pulse-dot"/> NATIONWIDE NETWORK</div><div><b>{summary.active_parks ?? summary.activeParks ?? '—'}</b><span>Active parks<br/>Lagos &amp; Ogun</span></div><div><b>{summary.nationwide_parks ?? summary.nationwideParks ?? '—'}</b><span>Nationwide<br/>36 states + FCT</span></div><div><b>{summary.verified_buses ?? summary.verifiedBuses ?? '—'}</b><span>Verified buses<br/>boarding now</span></div><div><b>{summary.online_riders ?? summary.onlineRiders ?? '—'}</b><span>Bikers &amp; dispatch<br/>riders online</span></div><div><b>{summary.average_wait_saved ?? '—'}<small>{summary.average_wait_saved ? ' min' : ''}</small></b><span>Average wait<br/>time saved</span></div><span className="ticker-source">Live service data</span></section>
 
-      <footer className="home-footer"><a className="footer-brand" href="/">DE RIDE</a><span>Connecting people, parks and possibilities.</span><div className="footer-hubs">{launchHubs.map(hub => <span key={hub}><i />{hub}</span>)}</div></footer>
-    </main>
-  );
+    <section className="content-section" id="portals"><div className="section-intro"><div className="eyebrow">ONE ECOSYSTEM · SIX PORTALS</div><h2>Every journey has a better way.</h2><p>One connected network for passengers, transport teams and the people who keep Nigeria moving.</p></div><RoleShowcaseTabs/></section>
+
+    <section className="content-section fare-section" id="pricing"><div className="section-intro"><div className="eyebrow">CLEAR FARES. FAIR REFUNDS.</div><h2>Know what you pay before you book.</h2><p>See every fee and your refund amount up front. No fare surprises at the park.</p></div><FareRefundSimulator/></section>
+
+    <section className="ticket-section"><div className="ticket-copy"><div className="eyebrow">WORKS EVEN OFFLINE</div><h2>Your ticket stays valid<br/>when the network doesn’t.</h2><p>Every booking comes with a cryptographically signed QR pass and a manual backup code. Drivers verify in under 150ms—even in park dead zones.</p><ul><li><Check/> ECDSA P-256 signed QR code</li><li><Check/> Manual code: <code>DR-OG-4918-K3</code></li><li><Check/> Cached public-key verification</li></ul><button className="text-audio" onClick={() => speak('Your ticket works offline. Show the signed QR code or tell your driver the manual ticket code.') }><Speaker size={16}/> Hear how it works</button></div><div className="ticket-pass"><div className="pass-brand"><span>DE <i>RIDE</i></span><small>BOARDING PASS</small></div><div className="pass-route"><div><small>FROM</small><b>Berger Terminal</b><span>Lagos State</span></div><ArrowRight/><div><small>TO</small><b>Kuto Park</b><span>Abeokuta, Ogun</span></div></div><div className="qr-demo"><div className="qr-grid" aria-label="Decorative QR code"><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/><span/></div><div><small>SCAN OR ENTER CODE</small><strong>DR-OG-4918-K3</strong><span><ShieldCheck size={13}/> Signed &amp; verified offline</span></div></div><div className="pass-footer"><span>OGUN EXPRESS</span><span>11:45 AM · SEAT 08</span></div></div></section>
+
+    <section className="content-section plans-section"><div className="section-intro"><div className="eyebrow">MEMBERSHIPS THAT MOVE WITH YOU</div><h2>Pick the plan for your road.</h2><p>Simple tiers for frequent travellers and transport professionals.</p></div><Plans/></section>
+
+    <section className="ranks-section"><div className="section-intro"><div className="eyebrow">GO FURTHER. EARN MORE.</div><h2>Every completed trip counts.</h2><p>Build your status, unlock medals and earn cash rewards.</p></div><div className="rank-columns"><RankColumn title="Passenger ranks" icon={<Users/>} names={['Street Scout','Highway Cruiser','Express Voyager','Interstate Marshal','DE RIDE Legend']} rewards={['Get started','₦500','₦2,000','₦5,000','₦15,000']} thresholds={['0 trips','10 trips','30 trips','75 trips','150 trips']}/><RankColumn title="Driver & rider ranks" icon={<BusFront/>} names={['Verified Pilot','Route Captain','Highway Commander','Transit Titan','Grand Master of the Road']} rewards={['Get started','₦1,500','₦5,000','₦15,000','₦50,000']} thresholds={['0 trips','25 trips','80 trips','200 trips','500 trips']}/></div></section>
+
+    <section className="dual-section" id="amebo"><div className="dual-card amebo-card"><span className="feature-icon"><Mic2/></span><div className="eyebrow">YOUR ROAD COMPANION · POWERED BY GROQ</div><h2>Amebo AI keeps the ride lively.</h2><p>Traffic gist, Naija trivia and voice banter in Pidgin, Yoruba, Hausa, Igbo or English. Stay entertained—and drivers stay alert.</p><div className="amebo-chat"><span className="chat-avatar">A</span><div><small>AMEBO · PCM</small><p>“Omo, Lagos-Ibadan dey move small-small. Make we yarn some football gist?”</p></div><button aria-label="Play Amebo preview" onClick={() => speak('Omo, Lagos-Ibadan dey move small-small. Make we yarn some football gist?')}><Play size={15}/></button></div><div className="token-row"><span><b>10</b> free tokens daily</span><span>Expires 11:59 PM WAT</span></div><div className="token-packs">23 · ₦4,200 <i/> 50 · ₦6,700 <i/> 75 · ₦8,000 <i/> 100 · ₦10,200</div></div><div className="dual-card data-card" id="data"><span className="feature-icon"><Smartphone/></span><div className="eyebrow">STAY CONNECTED FOR LESS</div><h2>Top up data on the go.</h2><p>Quick bundles for GPS tracking, messages and trip updates. Pay with your DE RIDE Wallet or Paystack.</p><div className="networks">{[['MTN','#f5c518'],['Airtel','#f24b57'],['Glo','#80c342'],['9mobile','#00a886']].map(([name,color])=><button key={name} style={{'--network':color} as React.CSSProperties} onClick={() => document.querySelector('#plans-anchor')?.scrollIntoView({behavior:'smooth'})}><span>{name[0]}</span><b>{name}</b><ArrowUpRight size={15}/></button>)}</div><div className="data-note"><Wallet size={16}/> Browse available data plans and purchase securely in your wallet.</div></div></section>
+
+    <section className="safety-banner"><div className="safety-symbol"><ShieldCheck size={27}/></div><div className="safety-copy"><div className="eyebrow">SAFETY IS BUILT INTO EVERY TRIP</div><h2>Travel with confidence. Stay in control.</h2><p>Verified drivers and vehicles · Private co-passenger details · Trip chat deletes 6 minutes after arrival · Real-time SOS support from DE RIDE Admin.</p></div><div className="safety-points"><span><Check/> Cloudinary-verified credentials</span><span><Check/> Ephemeral 6-minute chat</span><span><Check/> Live admin SOS mediation</span></div></section>
+
+    <footer className="landing-footer"><div className="footer-main"><div className="footer-about"><Link href="/" className="landing-brand"><span className="brand-emblem"><BusFront/></span><span className="wordmark"><b>DE</b> <i>RIDE</i><small>MOVE WITH CONFIDENCE</small></span></Link><p>Better journeys for the people and businesses moving Nigeria forward.</p><a href="mailto:elversetechnologies@gmail.com">elversetechnologies@gmail.com</a></div><div><b>Explore</b><a href="#live-parks">Live parks</a><a href="#how-it-works">How it works</a><a href="#pricing">Plans &amp; rewards</a><a href="#amebo">Amebo AI</a></div><div><b>Popular states</b><div className="state-links">{['Ogun','Lagos','Abuja FCT','Rivers','Kano','Oyo','Enugu','Kaduna','Delta','Edo','Anambra','Kwara'].map(s=><a key={s} href="#live-parks">{s}</a>)}</div></div><div><b>Support &amp; policies</b><a href="mailto:elversetechnologies@gmail.com">Contact support</a><a href="/terms">Terms of service</a><a href="/privacy">Privacy policy</a><a href="/refund-policy">Refund policy</a><button className="install-button" onClick={install} disabled={!installEvent}><Smartphone size={17}/> Install DE RIDE App (PWA)</button></div></div><div className="footer-bottom"><span>© {new Date().getFullYear()} DE RIDE · Made for Nigeria</span><span>36 states + FCT <i/> Lagos &amp; Ogun launch hubs</span></div></footer>
+  </main>;
 }
+
+function Plans() {
+  const [audience, setAudience] = useState<'passenger'|'pro'>('passenger');
+  const passenger = [{name:'Commuter Lite',price:'₦0',desc:'Book as you go',features:['Live bus search','Offline QR tickets','Transparent fares']},{name:'Swift Commuter Pass',price:'₦2,500',desc:'per month',features:['Platform fee waiver','Priority seat alerts','Trip history']},{name:'Executive Transit Club',price:'₦5,000',desc:'per month',features:['All Swift benefits','Premium support','Exclusive offers']},{name:'Founding Sovereign',price:'₦60,000',desc:'one-time · lifetime',features:['Lifetime passenger access','Fee waiver benefits','Founding member status'],featured:true}];
+  const pro = [{name:'Pay-As-You-Load',price:'₦250',desc:'per bus / trip',features:['No monthly commitment','Pay when a trip departs','For drivers and riders']},{name:'Fleet & Rider Pro',price:'₦5,000',desc:'per month',features:['Fleet trip tools','Rider work feed','Priority support']},{name:'Terminal Command Suite',price:'₦15,000',desc:'per month',features:['Multi-bay controls','Fleet onboarding','Revenue tools']}];
+  return <><div className="plan-toggle"><button className={audience==='passenger'?'selected':''} onClick={()=>setAudience('passenger')}>Passenger plans</button><button className={audience==='pro'?'selected':''} onClick={()=>setAudience('pro')}>Driver / operator plans</button></div><div className="plan-grid">{(audience==='passenger'?passenger:pro).map(p=><article className={`plan-card ${p.featured?'featured':''}`} key={p.name}>{p.featured&&<span className="plan-badge">PASSENGER ONLY</span>}<h3>{p.name}</h3><p>{p.desc}</p><div className="plan-price">{p.price}<small>{p.desc.includes('month')?'/mo':''}</small></div><ul>{p.features.map(f=><li key={f}><Check size={15}/>{f}</li>)}</ul><Link className={p.featured?'cta':'plan-link'} href="/login">Choose plan <ArrowRight size={15}/></Link></article>)}</div><p className="plan-footnote"><ShieldCheck size={15}/> The ₦60,000 one-time lifetime plan is exclusively for passengers.</p><div id="plans-anchor"/></>;
+}
+function RankColumn({title,icon,names,rewards,thresholds}:{title:string;icon:React.ReactNode;names:string[];rewards:string[];thresholds:string[]}) { return <div className="rank-column"><h3>{icon}{title}</h3>{names.map((name,i)=><div className="rank-row" key={name}><span className={`rank-medal medal-${i+1}`}>{i+1}</span><span className="rank-name"><b>{name}</b><small>{thresholds[i]}</small></span><span className="rank-reward">{rewards[i]}</span></div>)}</div>; }

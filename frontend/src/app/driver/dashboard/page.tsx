@@ -1,1 +1,2 @@
-export default function Driver(){return <main style={{padding:24}}><a href="/">← DE RIDE</a><h1>Driver dashboard</h1><p>GPS is optional. If enabled, your device data and battery are used for live trip location.</p><p>Capacity and departure edits are available once connected and respect the 120-second cooldown.</p><a href="/login">Sign in to continue →</a></main>}
+import Link from 'next/link';
+export default function Driver(){return <main style={{padding:24}}><Link href="/">← DE RIDE</Link><h1>Driver dashboard</h1><p>GPS is optional. If enabled, your device data and battery are used for live trip location.</p><p>Capacity and departure edits are available once connected and respect the 120-second cooldown.</p><Link href="/login">Sign in to continue →</Link></main>}

@@ -1,8 +1,8 @@
 'use client';
 
 import { useState } from 'react';
+import Link from 'next/link';
 import { createRealtimeClient } from '@neon/realtime/client';
-import { getNeonAuthClient } from '@/lib/neon-auth';
 
 const services = ['postgres', 'ai-gateway', 'object-storage', 'functions', 'realtime'] as const;
 
@@ -14,10 +14,8 @@ export default function NeonServiceConsole() {
     setBusy(service);
     setMessage(`Checking ${service}…`);
     try {
-      const auth = getNeonAuthClient();
-      const tokenResult = await auth.token();
-      const bearer = tokenResult.data?.token;
-      if (tokenResult.error || !bearer) throw new Error('Sign in is required to run service checks.');
+      const bearer = sessionStorage.getItem('deride_access_token');
+      if (!bearer) throw new Error('Sign in is required to run service checks.');
 
       const response = await fetch('/api/neon/probe', {
         method: 'POST',
@@ -65,7 +63,7 @@ export default function NeonServiceConsole() {
   }
 
   return <main style={{ maxWidth: 760, margin: '64px auto', padding: 24 }}>
-    <a href="/">← DE RIDE</a>
+    <Link href="/">← DE RIDE</Link>
     <h1>Neon service connections</h1>
     <p>Checks require an authenticated DE RIDE account. Storage checks upload, download and remove a temporary object.</p>
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>

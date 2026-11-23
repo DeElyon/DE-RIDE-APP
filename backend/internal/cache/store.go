@@ -5,6 +5,7 @@ import "time"
 type CacheStore interface {
 	Get(key string) ([]byte, bool)
 	SetWithTTL(key string, value []byte, ttl time.Duration)
+	SetIfAbsent(key string, value []byte, ttl time.Duration) bool
 	Delete(key string)
 	Incr(key string, ttl time.Duration) (int64, error)
 }

@@ -1,17 +1,31 @@
 # DE RIDE ecosystem
 
-DE RIDE is a multi-role Nigerian mobility platform. This repository contains the Next.js PWA, Go API, FastAPI Amebo service, and PostgreSQL/PostGIS schema.
+DE RIDE is a multi-role Nigerian mobility platform monorepo. It contains a Next.js PWA, Go/Fiber API, FastAPI Amebo AI service, and PostgreSQL/PostGIS migrations. The repository is a runnable foundation; integrations that require credentials and several operational flows remain unavailable until their handlers and provider configuration are completed.
 
 ## Local development
 
-Copy the relevant `.env.example` to the service's local environment file and provide real provider credentials. Never commit secrets. PostgreSQL must have PostGIS enabled. Start the API with `cd backend && go run ./cmd/api`; start Amebo with `cd ai && uvicorn app.main:app --reload`; start the web app with `cd frontend && npm install && npm run dev`.
+Copy `backend/.env.example`, `ai/.env.example`, and `frontend/.env.example` to local `.env` files and supply secrets through your local secret manager. Do not commit credentials. A PostgreSQL instance with PostGIS and pgcrypto is required.
 
-The API requires `DATABASE_URL`, JWT secrets, and `INTERNAL_AI_SHARED_SECRET`. Payment, mail, maps, Cloudinary, Groq and VTU operations require their corresponding credentials. Missing integrations fail closed rather than returning simulated success. Apply SQL migrations in numerical order using `database/scripts/migrate.go` or your PostgreSQL migration runner. Seed files contain reference configuration only; they do not fabricate users, transactions, trips, or operational activity.
+Apply migrations from `backend/` with `go run ../database/scripts/migrate.go`; this uses `DATABASE_URL` and runs ordered, unapplied SQL files transactionally. Seed scripts do not create fake users, park locations, transactions, operational activity, or unapproved rank prizes. Load verified park boundaries, approved reward schedules, and administrator accounts through controlled provisioning. Subscription seeds include only the specified ₦60,000 passenger plan and ₦250 per-bus trip option.
 
-## Financial invariants
+Start services in separate terminals:
 
-Ticket charges are base fare + ₦20 platform fee (unless explicitly waived) + Paystack fee. The local Paystack estimate is 1.5% + ₦100, with the ₦100 waived below ₦2,500 and the local fee capped at ₦2,000. Provider verification is authoritative before a payment is settled. Paystack and platform fees are excluded from fare refunds; cancellation, late arrival and no-show refund 100%, 80% and 40% of refundable base fare respectively. Refunds are idempotent ledger entries.
+```sh
+cd backend && go run ./cmd/api
+cd ai && uvicorn app.main:app --reload
+cd frontend && npm ci && npm run dev
+```
 
-Daily Amebo allowances use Africa/Lagos day boundaries and expire; purchased bundles remain available until used. Cache and websocket state are process-local and are not used as a financial source of truth. Multi-instance deployments need sticky websocket routing or a shared pub/sub adapter before horizontal scaling.
+The current Go API implements database health, park reads, Argon2id password registration/login, email OTP verification, active-role JWT validation, rider-mode switching, and assigned-operator capacity/departure updates. The cooldown is enforced in Postgres so it holds across API restarts. Amebo chat, trivia, and voice transcription call Groq when configured; its internal key is mandatory. Offline ticket helpers verify P-256 ECDSA payloads and manual ticket checksums, but require a matching backend signer and public key to issue production tickets.
 
-See `backend/API.md` for route contracts and `database/migrations` for schema rules. This repository provides deployable service foundations; production launch still requires real credentials, operational park/route data, provider verification, security review, and deployment configuration.
+## Financial and safety invariants
+
+The fare helper defines the local Paystack estimate as 1.5% + ₦100, waiving ₦100 below ₦2,500 and capping the local fee at ₦2,000. Provider verification must precede settlement. Fare refund percentages are 100%, 80%, and 40%; platform and Paystack fees are excluded. These rules are documented as requirements; end-to-end checkout, settlement, refunds, and ledger handlers are not yet wired into the API.
+
+Memory cache and websocket state are process-local and must not be used as a financial source of truth. The current API does not yet expose the requested WebSocket hub or background workers. Multi-instance deployment needs shared pub/sub or sticky routing for realtime rooms.
+
+## Deployment
+
+Render configuration is in `backend/render.yaml` and `ai/render.yaml`; Vercel configuration is in `frontend/vercel.json`. Add environment values in each host's secret settings. GitHub Actions run service checks, and `.github/workflows/create-delete-neon-branch.yml` creates expiring PR branches and removes them when PRs close. Set `NEON_PROJECT_ID` as a repository variable and `NEON_API_KEY` as a repository secret.
+
+See `backend/API.md` for the implemented API surface and gaps, and `database/migrations` for schema rules. Do not enable live payments or production routing until the missing transactional handlers, provider webhooks, KYC review, and operational park data have been implemented and reviewed.

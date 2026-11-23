@@ -15,10 +15,9 @@ func (c Cooldown) Acquire(key string) (time.Duration, bool) {
 		c.Duration = 120 * time.Second
 	}
 	marker := []byte(time.Now().UTC().Format(time.RFC3339Nano))
-	if _, exists := c.Store.Get("cooldown:" + key); exists {
+	if !c.Store.SetIfAbsent("cooldown:"+key, marker, c.Duration) {
 		return c.Duration, false
 	}
-	c.Store.SetWithTTL("cooldown:"+key, marker, c.Duration)
 	return 0, true
 }
 func SeatHoldKey(trip, seat string) string { return fmt.Sprintf("seat:%s:%s", trip, seat) }

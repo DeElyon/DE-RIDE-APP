@@ -64,6 +64,19 @@ func (s *MemoryStore) SetWithTTL(k string, v []byte, ttl time.Duration) {
 	s.entries[k] = item{append([]byte(nil), v...), expiry}
 	s.mu.Unlock()
 }
+func (s *MemoryStore) SetIfAbsent(k string, v []byte, ttl time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if old, ok := s.entries[k]; ok && (old.expires.IsZero() || time.Now().Before(old.expires)) {
+		return false
+	}
+	var expiry time.Time
+	if ttl > 0 {
+		expiry = time.Now().Add(ttl)
+	}
+	s.entries[k] = item{append([]byte(nil), v...), expiry}
+	return true
+}
 func (s *MemoryStore) Delete(k string) { s.mu.Lock(); delete(s.entries, k); s.mu.Unlock() }
 func (s *MemoryStore) Incr(k string, ttl time.Duration) (int64, error) {
 	s.mu.Lock()
