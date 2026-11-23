@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: deride-api
+    runtime: docker
+    rootDir: .
+    dockerfilePath: ./backend/Dockerfile
+    healthCheckPath: /healthz
+    preDeployCommand: MIGRATIONS_DIR=/database/migrations /migrate
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_ACCESS_SECRET
+        sync: false
+      - key: JWT_REFRESH_SECRET
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: AI_SERVICE_URL
+        sync: false
+      - key: INTERNAL_AI_SHARED_SECRET
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false

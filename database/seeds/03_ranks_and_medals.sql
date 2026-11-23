@@ -1,0 +1,2 @@
+-- Reward thresholds and cash values must be approved as business rules before
+-- seeding. Do not invent rank milestones or payouts in a production database.
