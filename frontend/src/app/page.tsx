@@ -24,9 +24,9 @@ export default function Home() {
   const [installEvent, setInstallEvent] = useState<Event | null>(null);
 
   useEffect(() => {
-    const base = process.env.NEXT_PUBLIC_API_URL ?? '';
-    fetch(`${base}/api/v1/parks`).then(r => r.ok ? r.json() : null).then(d => setParks(d?.parks ?? [])).catch(() => setParks([]));
-    fetch(`${base}/api/v1/parks/summary`).then(r => r.ok ? r.json() : null).then(d => { if (d) setSummary(d); }).catch(() => undefined);
+    const base = process.env.NEXT_PUBLIC_API_BASE_URL ?? '/api/v1';
+    fetch(`${base}/parks`).then(r => r.ok ? r.json() : null).then(d => setParks(d?.parks ?? [])).catch(() => setParks([]));
+    fetch(`${base}/parks/summary`).then(r => r.ok ? r.json() : null).then(d => { if (d) setSummary(d); }).catch(() => undefined);
     const onInstall = (event: Event) => { event.preventDefault(); setInstallEvent(event); };
     window.addEventListener('beforeinstallprompt', onInstall);
     return () => window.removeEventListener('beforeinstallprompt', onInstall);
@@ -78,8 +78,9 @@ export default function Home() {
 
 function Plans() {
   const [audience, setAudience] = useState<'passenger'|'pro'>('passenger');
-  const passenger = [{name:'Commuter Lite',price:'₦0',desc:'Book as you go',features:['Live bus search','Offline QR tickets','Transparent fares']},{name:'Swift Commuter Pass',price:'₦2,500',desc:'per month',features:['Platform fee waiver','Priority seat alerts','Trip history']},{name:'Executive Transit Club',price:'₦5,000',desc:'per month',features:['All Swift benefits','Premium support','Exclusive offers']},{name:'Founding Sovereign',price:'₦60,000',desc:'one-time · lifetime',features:['Lifetime passenger access','Fee waiver benefits','Founding member status'],featured:true}];
-  const pro = [{name:'Pay-As-You-Load',price:'₦250',desc:'per bus / trip',features:['No monthly commitment','Pay when a trip departs','For drivers and riders']},{name:'Fleet & Rider Pro',price:'₦5,000',desc:'per month',features:['Fleet trip tools','Rider work feed','Priority support']},{name:'Terminal Command Suite',price:'₦15,000',desc:'per month',features:['Multi-bay controls','Fleet onboarding','Revenue tools']}];
+  type Plan = {name:string;price:string;desc:string;features:string[];featured?:boolean};
+  const passenger: Plan[] = [{name:'Commuter Lite',price:'₦0',desc:'Book as you go',features:['Live bus search','Offline QR tickets','Transparent fares']},{name:'Swift Commuter Pass',price:'₦2,500',desc:'per month',features:['Platform fee waiver','Priority seat alerts','Trip history']},{name:'Executive Transit Club',price:'₦5,000',desc:'per month',features:['All Swift benefits','Premium support','Exclusive offers']},{name:'Founding Sovereign',price:'₦60,000',desc:'one-time · lifetime',features:['Lifetime passenger access','Fee waiver benefits','Founding member status'],featured:true}];
+  const pro: Plan[] = [{name:'Pay-As-You-Load',price:'₦250',desc:'per bus / trip',features:['No monthly commitment','Pay when a trip departs','For drivers and riders']},{name:'Fleet & Rider Pro',price:'₦5,000',desc:'per month',features:['Fleet trip tools','Rider work feed','Priority support']},{name:'Terminal Command Suite',price:'₦15,000',desc:'per month',features:['Multi-bay controls','Fleet onboarding','Revenue tools']}];
   return <><div className="plan-toggle"><button className={audience==='passenger'?'selected':''} onClick={()=>setAudience('passenger')}>Passenger plans</button><button className={audience==='pro'?'selected':''} onClick={()=>setAudience('pro')}>Driver / operator plans</button></div><div className="plan-grid">{(audience==='passenger'?passenger:pro).map(p=><article className={`plan-card ${p.featured?'featured':''}`} key={p.name}>{p.featured&&<span className="plan-badge">PASSENGER ONLY</span>}<h3>{p.name}</h3><p>{p.desc}</p><div className="plan-price">{p.price}<small>{p.desc.includes('month')?'/mo':''}</small></div><ul>{p.features.map(f=><li key={f}><Check size={15}/>{f}</li>)}</ul><Link className={p.featured?'cta':'plan-link'} href="/login">Choose plan <ArrowRight size={15}/></Link></article>)}</div><p className="plan-footnote"><ShieldCheck size={15}/> The ₦60,000 one-time lifetime plan is exclusively for passengers.</p><div id="plans-anchor"/></>;
 }
 function RankColumn({title,icon,names,rewards,thresholds}:{title:string;icon:React.ReactNode;names:string[];rewards:string[];thresholds:string[]}) { return <div className="rank-column"><h3>{icon}{title}</h3>{names.map((name,i)=><div className="rank-row" key={name}><span className={`rank-medal medal-${i+1}`}>{i+1}</span><span className="rank-name"><b>{name}</b><small>{thresholds[i]}</small></span><span className="rank-reward">{rewards[i]}</span></div>)}</div>; }

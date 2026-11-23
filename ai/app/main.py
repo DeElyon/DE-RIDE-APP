@@ -34,8 +34,8 @@ async def health():
 
 
 @app.post("/ai/v1/chat")
-async def chat(body: ChatRequest, x_internal_service_key: str | None = Header(default=None)):
-    require_internal_key(x_internal_service_key)
+async def chat(body: ChatRequest, x_internal_secret: str | None = Header(default=None)):
+    require_internal_key(x_internal_secret)
     if not is_safe(body.message):
         raise HTTPException(status_code=422, detail="prompt is not allowed")
     reply = await generate(system_prompt(body.language, body.persona), body.message)
@@ -43,16 +43,25 @@ async def chat(body: ChatRequest, x_internal_service_key: str | None = Header(de
 
 
 @app.post("/ai/v1/trivia")
-async def trivia(body: TriviaRequest, x_internal_service_key: str | None = Header(default=None)):
-    require_internal_key(x_internal_service_key)
+async def trivia(body: TriviaRequest, x_internal_secret: str | None = Header(default=None)):
+    require_internal_key(x_internal_secret)
     route = f" along {body.corridor}" if body.corridor else ""
     prompt = f"Ask one short, family-friendly Nigerian road and geography trivia question{route}. Do not provide its answer yet. Reply in {body.language}."
     return {"question": await generate(system_prompt(body.language, "passenger"), prompt), "token_cost": 1}
 
 
 @app.post("/ai/v1/voice")
-async def voice(audio: Annotated[UploadFile, File()], x_internal_service_key: Annotated[str | None, Header()] = None):
-    require_internal_key(x_internal_service_key)
+async def voice(
+    audio: Annotated[UploadFile, File()],
+    x_internal_secret: Annotated[str | None, Header()] = None,
+    language: str = "PCM",
+    persona: str = "passenger",
+):
+    require_internal_key(x_internal_secret)
+    if language not in {"EN", "PCM", "YO", "HA", "IG"}:
+        raise HTTPException(status_code=422, detail="unsupported language")
+    if persona not in {"passenger", "driver", "biker", "dispatch_rider", "operator"}:
+        raise HTTPException(status_code=422, detail="unsupported persona")
     allowed = {"audio/webm", "audio/ogg", "audio/wav", "audio/mpeg", "audio/mp4", "audio/m4a", "audio/x-m4a"}
     if audio.content_type not in allowed:
         raise HTTPException(status_code=415, detail="unsupported audio type")
@@ -72,4 +81,10 @@ async def voice(audio: Annotated[UploadFile, File()], x_internal_service_key: An
         model=os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3"),
         response_format="text",
     )
-    return {"transcription": str(result), "token_cost": 2}
+    transcript = str(result).strip()
+    if not transcript:
+        raise HTTPException(status_code=422, detail="no speech detected")
+    if not is_safe(transcript):
+        raise HTTPException(status_code=422, detail="transcribed prompt is not allowed")
+    reply = await generate(system_prompt(language, persona), transcript)
+    return {"transcription": transcript, "reply": reply, "token_cost": 2}

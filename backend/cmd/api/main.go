@@ -87,6 +87,20 @@ func main() {
 		}
 		return c.JSON(fiber.Map{"parks": parks})
 	})
+	v1.Get("/parks/summary", func(c *fiber.Ctx) error {
+		var active, nationwide, boarding, onlineRiders int64
+		var waitMinutes *float64
+		err := db.QueryRow(c.UserContext(), `SELECT
+			(SELECT count(*) FROM bus_parks WHERE launch_enabled),
+			(SELECT count(*) FROM bus_parks),
+			(SELECT count(*) FROM trips WHERE status='OPEN' AND departure_at >= now()),
+			(SELECT count(DISTINCT biker_id) FROM ride_orders WHERE status IN ('ACCEPTED','IN_PROGRESS') AND biker_id IS NOT NULL),
+			(SELECT avg(greatest(0,extract(epoch FROM (departure_at-now()))/60)) FROM trips WHERE status='OPEN' AND departure_at >= now())`).Scan(&active, &nationwide, &boarding, &onlineRiders, &waitMinutes)
+		if err != nil {
+			return c.Status(503).JSON(errJSON("ERR_DATABASE_UNAVAILABLE"))
+		}
+		return c.JSON(fiber.Map{"active_parks": active, "nationwide_parks": nationwide, "verified_buses": boarding, "online_riders": onlineRiders, "average_wait_saved": waitMinutes})
+	})
 	secure := v1.Group("", authenticate(os.Getenv("JWT_ACCESS_SECRET"), db))
 	secure.Post("/users/switch-rider-mode", func(c *fiber.Ctx) error {
 		me := c.Locals("identity").(identity)
