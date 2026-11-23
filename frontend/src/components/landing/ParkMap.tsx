@@ -23,7 +23,7 @@ export function ParkMap({ parks, origin, destination, onReverse }: { parks: Park
     let map: MapLibreMap | null = null;
     void import('maplibre-gl').then(maplibregl => {
       if (cancelled || !container.current) return;
-      const createdMap = new maplibregl.Map({ container: container.current, style: process.env.NEXT_PUBLIC_OPENFREEMAP_STYLE ?? 'https://tiles.openfreemap.org/styles/fiord', center: [7.5, 6.5], zoom: 5.3, attributionControl: false });
+      const createdMap = new maplibregl.Map({ container: container.current, style: process.env.NEXT_PUBLIC_OPENFREEMAP_STYLE ?? 'https://tiles.openfreemap.org/styles/liberty', center: [7.5, 6.5], zoom: 5.3, attributionControl: false });
       map = createdMap;
       mapRef.current = createdMap;
       createdMap.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');

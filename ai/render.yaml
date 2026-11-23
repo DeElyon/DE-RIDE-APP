@@ -2,5 +2,11 @@ services:
   - type: web
     name: deride-ai
     runtime: docker
+    rootDir: .
     dockerfilePath: ./ai/Dockerfile
     healthCheckPath: /healthz
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: INTERNAL_AI_SHARED_SECRET
+        sync: false

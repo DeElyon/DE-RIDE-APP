@@ -26,6 +26,12 @@ Memory cache and websocket state are process-local and must not be used as a fin
 
 ## Deployment
 
-Render configuration is in `backend/render.yaml` and `ai/render.yaml`; Vercel configuration is in `frontend/vercel.json`. Add environment values in each host's secret settings. GitHub Actions run service checks, and `.github/workflows/create-delete-neon-branch.yml` creates expiring PR branches and removes them when PRs close. Set `NEON_PROJECT_ID` as a repository variable and `NEON_API_KEY` as a repository secret.
+Deploy `frontend/` as the Vercel project root. Set `NEXT_PUBLIC_API_BASE_URL` to the Render API URL plus `/api/v1`, for example `https://deride-api.onrender.com/api/v1`; set `NEXT_PUBLIC_WS_URL` to `wss://deride-api.onrender.com/api/v1/ws` only for authenticated realtime clients. Set `NEXT_PUBLIC_OPENFREEMAP_STYLE` to `https://tiles.openfreemap.org/styles/liberty`. These `NEXT_PUBLIC_*` values are embedded at build time, so configure them before each Vercel build.
+
+The Render blueprints are `backend/render.yaml` and `ai/render.yaml`. Both build from the repository root. The API pre-deploy command runs the included migration binary against `DATABASE_URL`; create a Neon database with PostGIS available and supply that URL to Render. Set `ALLOWED_ORIGINS` to the exact Vercel production origin. Set the same high-entropy `INTERNAL_AI_SHARED_SECRET` on both Render services, set API `AI_SERVICE_URL` to the private Render AI service URL, and set `GROQ_API_KEY` on the AI service. Configure `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET` as separate secrets of at least 32 characters. SMTP credentials are required for registration OTP delivery.
+
+In-memory cache and WebSocket room membership are per Render process and have no separate cache service charge. Use a single API instance for these realtime rooms; multiple instances do not share rooms. Database migrations are deployed automatically by Render's pre-deploy command.
+
+GitHub Actions run service checks, and `.github/workflows/create-delete-neon-branch.yml` creates expiring PR branches and removes them when PRs close. Set `NEON_PROJECT_ID` as a repository variable and `NEON_API_KEY` as a repository secret.
 
 See `backend/API.md` for the implemented API surface and gaps, and `database/migrations` for schema rules. Do not enable live payments or production routing until the missing transactional handlers, provider webhooks, KYC review, and operational park data have been implemented and reviewed.

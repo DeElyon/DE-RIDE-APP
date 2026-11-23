@@ -22,3 +22,16 @@ export async function apiRequest(path: string, init: RequestInit = {}): Promise<
   }
   return response;
 }
+
+// Browsers cannot attach an Authorization header to a WebSocket handshake. Get
+// a short-lived ticket over the authenticated API, then use it for the upgrade.
+export async function openAuthenticatedWebSocket(): Promise<WebSocket> {
+  if (typeof window === 'undefined') throw new Error('WebSockets are only available in the browser');
+  const response = await apiRequest('/ws-ticket', { method: 'POST' });
+  if (!response.ok) throw new Error('Could not authorize realtime connection');
+  const { ticket } = await response.json() as { ticket: string };
+  const endpoint = process.env.NEXT_PUBLIC_WS_URL || `${API_BASE.replace(/^http/, 'ws')}/ws`;
+  const url = new URL(endpoint);
+  url.searchParams.set('ticket', ticket);
+  return new WebSocket(url);
+}

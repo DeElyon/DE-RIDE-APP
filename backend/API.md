@@ -10,7 +10,9 @@ All endpoints are rooted at `/api/v1`. Authenticated routes require a signed acc
 | Profiles | `POST /api/v1/users/switch-rider-mode` (JWT, approval, active-job and persisted active-role checks) |
 | Trips | `POST /api/v1/trips/:id/capacity` (JWT, assigned role, database 120-second cooldown) |
 | Tickets, orders, wallet, VTU | Planned; not implemented |
-| WebSockets and background workers | Planned; not implemented |
+| WebSockets and background workers | Authenticated trip rooms, persisted chat messages, and six-minute post-arrival purge |
+
+The browser obtains a 30-second WebSocket ticket with authenticated `POST /api/v1/ws-ticket`, then connects to `GET /api/v1/ws?ticket=...`. `frontend/src/lib/api-client.ts` provides `openAuthenticatedWebSocket()`. Join a trip with `{"event":"room:join","trip_id":"..."}` and send chat with `{"event":"chat:send_message","trip_id":"...","content":"..."}`. Trip access is restricted to its assigned driver and ticketed passengers. Room membership is process-local; deploy one API instance until a shared realtime transport is added. Migration `012_realtime_lifecycle.sql` adds `trips.arrived_at`, which must be set when a trip is marked arrived for six-minute cleanup to run.
 
 Error envelope: `{"error":"ERR_CODE","message":"...","retry_after_seconds":120}`. Capacity edits return HTTP 429 `ERR_CAPACITY_COOLDOWN_ACTIVE`. The database constrains the ₦60,000 one-time plan to the PASSENGER role; a purchase endpoint is not implemented yet. Rider-mode switching requires both approved registrations and no in-progress ride or delivery. GPS opt-in and source precedence HARDWARE > DRIVER_APP > DISPATCHER_APP > MANUAL remain schema/product requirements; telemetry endpoints are not implemented.
 

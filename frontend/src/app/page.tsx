@@ -28,7 +28,7 @@ export default function Home() {
   const [installEvent, setInstallEvent] = useState<Event | null>(null);
 
   useEffect(() => {
-    const base = process.env.NEXT_PUBLIC_API_BASE_URL ?? '/api/v1';
+    const base = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:8080/api/v1';
     fetch(`${base}/parks`).then(r => r.ok ? r.json() : null).then(d => setParks(d?.parks ?? [])).catch(() => setParks([]));
     fetch(`${base}/parks/summary`).then(r => r.ok ? r.json() : null).then(d => { if (d) setSummary(d); }).catch(() => undefined);
     const onInstall = (event: Event) => { event.preventDefault(); setInstallEvent(event); };

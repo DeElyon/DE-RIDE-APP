@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -9,9 +10,12 @@ import (
 	"time"
 
 	"github.com/deride/ecosystem/backend/internal/cache"
+	"github.com/deride/ecosystem/backend/internal/realtime"
+	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -43,6 +47,7 @@ func main() {
 	}
 	store := cache.NewMemoryStore(30 * time.Second)
 	defer store.Close()
+	hub := realtime.NewHub()
 	app := fiber.New(fiber.Config{AppName: "DE RIDE API", ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, BodyLimit: 2 * 1024 * 1024})
 	origins := strings.TrimSpace(os.Getenv("ALLOWED_ORIGINS"))
 	if origins == "" {
@@ -55,6 +60,7 @@ func main() {
 		return c.Next()
 	})
 	app.Get("/healthz", func(c *fiber.Ctx) error { return c.JSON(fiber.Map{"status": "ok", "service": "deride-api"}) })
+	go purgeExpiredTripMessages(db)
 	v1 := app.Group("/api/v1")
 	registerAuthRoutes(v1, db)
 	v1.Get("/health", func(c *fiber.Ctx) error {
@@ -102,6 +108,89 @@ func main() {
 		return c.JSON(fiber.Map{"active_parks": active, "nationwide_parks": nationwide, "verified_buses": boarding, "online_riders": onlineRiders, "average_wait_saved": waitMinutes})
 	})
 	secure := v1.Group("", authenticate(os.Getenv("JWT_ACCESS_SECRET"), db))
+	secure.Post("/ws-ticket", func(c *fiber.Ctx) error {
+		me := c.Locals("identity").(identity)
+		ticket := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"sub": me.UserID, "role": me.Role, "token_type": "websocket", "jti": uuid.NewString(), "exp": time.Now().Add(30 * time.Second).Unix()})
+		signed, err := ticket.SignedString([]byte(os.Getenv("JWT_ACCESS_SECRET")))
+		if err != nil {
+			return c.Status(500).JSON(errJSON("ERR_WS_TICKET_ISSUE"))
+		}
+		return c.JSON(fiber.Map{"ticket": signed, "expires_in_seconds": 30})
+	})
+	secure.Get("/ws", websocket.New(func(conn *websocket.Conn) {
+		me, ok := conn.Locals("identity").(identity)
+		if !ok {
+			_ = conn.WriteJSON(fiber.Map{"error": "ERR_AUTH_REQUIRED"})
+			return
+		}
+		client := &realtime.Client{Conn: conn.Conn}
+		if me.Role == "ADMIN" {
+			hub.Join("admin:sos", client)
+		}
+		defer hub.Leave(client)
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var event struct {
+				Type        string `json:"event"`
+				TripID      string `json:"trip_id"`
+				Content     string `json:"content"`
+				Category    string `json:"category"`
+				Description string `json:"description"`
+			}
+			if json.Unmarshal(raw, &event) != nil || event.TripID == "" {
+				_ = client.Send(fiber.Map{"event": "error", "code": "ERR_INVALID_EVENT"})
+				continue
+			}
+			ctx, done := context.WithTimeout(context.Background(), 3*time.Second)
+			switch event.Type {
+			case "room:join":
+				var allowed bool
+				err = db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM trips t WHERE t.id=$1 AND (t.driver_id=$2 OR EXISTS(SELECT 1 FROM tickets k WHERE k.trip_id=t.id AND k.passenger_id=$2)))`, event.TripID, me.UserID).Scan(&allowed)
+				if err == nil && allowed {
+					hub.Join("trip:"+event.TripID, client)
+					err = client.Send(fiber.Map{"event": "room:joined", "trip_id": event.TripID})
+				} else {
+					err = client.Send(fiber.Map{"event": "error", "code": "ERR_TRIP_ACCESS_DENIED"})
+				}
+			case "chat:send_message":
+				if len(event.Content) == 0 || len(event.Content) > 2000 {
+					err = client.Send(fiber.Map{"event": "error", "code": "ERR_INVALID_MESSAGE"})
+					break
+				}
+				var messageID string
+				err = db.QueryRow(ctx, `INSERT INTO messages(trip_id,sender_id,body) SELECT t.id,$2,$3 FROM trips t WHERE t.id=$1 AND (t.driver_id=$2 OR EXISTS(SELECT 1 FROM tickets k WHERE k.trip_id=t.id AND k.passenger_id=$2)) AND NOT(t.status IN ('ARRIVED','CANCELLED') AND t.arrived_at IS NOT NULL AND now()>t.arrived_at+interval '6 minutes') RETURNING id`, event.TripID, me.UserID, event.Content).Scan(&messageID)
+				if err == nil {
+					hub.Broadcast("trip:"+event.TripID, fiber.Map{"event": "chat:message", "id": messageID, "trip_id": event.TripID, "sender_id": me.UserID, "content": event.Content, "created_at": time.Now().UTC()})
+				} else {
+					err = client.Send(fiber.Map{"event": "error", "code": "ERR_CHAT_UNAVAILABLE"})
+				}
+			case "escalation:create":
+				issue := strings.TrimSpace(event.Category + ": " + event.Description)
+				if len(issue) < 4 || len(issue) > 2000 {
+					err = client.Send(fiber.Map{"event": "error", "code": "ERR_INVALID_ESCALATION"})
+					break
+				}
+				var escalationID string
+				err = db.QueryRow(ctx, `INSERT INTO escalations(reporter_id,trip_id,issue,status) SELECT $2,t.id,$3,'OPEN' FROM trips t WHERE t.id=$1 AND (t.driver_id=$2 OR EXISTS(SELECT 1 FROM tickets k WHERE k.trip_id=t.id AND k.passenger_id=$2)) RETURNING id`, event.TripID, me.UserID, issue).Scan(&escalationID)
+				if err == nil {
+					alert := fiber.Map{"event": "escalation:urgent_alert", "escalation_id": escalationID, "trip_id": event.TripID, "reporter_id": me.UserID, "issue": issue}
+					hub.Broadcast("admin:sos", alert)
+					hub.Broadcast("trip:"+event.TripID, alert)
+				} else {
+					err = client.Send(fiber.Map{"event": "error", "code": "ERR_ESCALATION_UNAVAILABLE"})
+				}
+			default:
+				err = client.Send(fiber.Map{"event": "error", "code": "ERR_UNKNOWN_EVENT"})
+			}
+			done()
+			if err != nil {
+				return
+			}
+		}
+	}, websocket.Config{Origins: strings.Split(origins, ",")}))
 	secure.Post("/users/switch-rider-mode", func(c *fiber.Ctx) error {
 		me := c.Locals("identity").(identity)
 		var in struct {
@@ -195,6 +284,14 @@ func authenticate(secret string, db *pgxpool.Pool) fiber.Handler {
 			return c.Status(503).JSON(errJSON("ERR_AUTH_NOT_CONFIGURED"))
 		}
 		parts := strings.Fields(c.Get("Authorization"))
+		ticketAuth := false
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+			if c.Path() != "/api/v1/ws" || c.Query("ticket") == "" {
+				return c.Status(401).JSON(errJSON("ERR_AUTH_REQUIRED"))
+			}
+			parts = []string{"Bearer", c.Query("ticket")}
+			ticketAuth = true
+		}
 		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
 			return c.Status(401).JSON(errJSON("ERR_AUTH_REQUIRED"))
 		}
@@ -213,6 +310,10 @@ func authenticate(secret string, db *pgxpool.Pool) fiber.Handler {
 		}
 		sub, _ := claims["sub"].(string)
 		role, _ := claims["role"].(string)
+		tokenType, _ := claims["token_type"].(string)
+		if ticketAuth && tokenType != "websocket" || !ticketAuth && tokenType == "websocket" {
+			return c.Status(401).JSON(errJSON("ERR_INVALID_TOKEN"))
+		}
 		if sub == "" || role == "" {
 			return c.Status(401).JSON(errJSON("ERR_INVALID_TOKEN"))
 		}
@@ -236,4 +337,14 @@ func envInt32(k string, fallback int32) int32 {
 		return fallback
 	}
 	return n
+}
+
+func purgeExpiredTripMessages(db *pgxpool.Pool) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, _ = db.Exec(ctx, `DELETE FROM messages m USING trips t WHERE m.trip_id=t.id AND t.status IN ('ARRIVED','CANCELLED') AND t.arrived_at IS NOT NULL AND now()>t.arrived_at+interval '6 minutes' AND NOT EXISTS(SELECT 1 FROM escalations e WHERE e.trip_id=t.id)`)
+		cancel()
+	}
 }
