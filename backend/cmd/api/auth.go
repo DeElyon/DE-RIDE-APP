@@ -64,7 +64,7 @@ func registerAuthRoutes(v1 fiber.Router, db *pgxpool.Pool) {
 		defer tx.Rollback(c.UserContext())
 		requestedRole := body.Role
 		activeRole := body.Role
-		if requestedRole == "DISPATCHER" || requestedRole == "PARK_OPERATOR" || requestedRole == "BIKER" || requestedRole == "DISPATCH_RIDER" {
+		if requestedRole == "DRIVER" || requestedRole == "DISPATCHER" || requestedRole == "PARK_OPERATOR" || requestedRole == "BIKER" || requestedRole == "DISPATCH_RIDER" {
 			activeRole = "PASSENGER"
 		}
 		var userID string
@@ -76,7 +76,9 @@ func registerAuthRoutes(v1 fiber.Router, db *pgxpool.Pool) {
 			if _, err = tx.Exec(c.UserContext(), `INSERT INTO role_requests(user_id,requested_role) VALUES($1,$2)`, userID, requestedRole); err != nil {
 				return c.Status(500).JSON(errJSON("ERR_ROLE_REQUEST_CREATE_FAILED"))
 			}
-			_, _ = tx.Exec(c.UserContext(), `INSERT INTO role_audit_log(user_id,actor_id,action,role,note) VALUES($1,$1,'REQUESTED',$2,'Initial account role selection')`, userID, requestedRole)
+			if _, err = tx.Exec(c.UserContext(), `INSERT INTO role_audit_log(user_id,actor_id,action,role,note) VALUES($1,$1,'REQUESTED',$2,'Initial account role selection')`, userID, requestedRole); err != nil {
+				return c.Status(500).JSON(errJSON("ERR_ROLE_AUDIT_FAILED"))
+			}
 		}
 		otpExpiryMinutes := envInt32("OTP_EXPIRY_MINUTES", 10)
 		if _, err = tx.Exec(c.UserContext(), `INSERT INTO email_otps(user_id,otp_hash,expires_at) VALUES($1,$2,now()+make_interval(mins=>$3))`, userID, otpHash(code), otpExpiryMinutes); err != nil {

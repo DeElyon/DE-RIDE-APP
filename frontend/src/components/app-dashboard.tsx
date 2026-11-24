@@ -50,6 +50,7 @@ const configs: Record<string, RoleConfig> = {
   ] },
   ADMIN: { title: 'Admin dashboard', subtitle: 'Account and command tools for DE RIDE administration.', icon: ShieldCheck, links: [
     { label: 'Command map', href: '/admin/command-map', icon: MapPin, note: 'Open administration tools' },
+    { label: 'Role requests', href: '/admin/roles', icon: ShieldCheck, note: 'Review and assign operational access' },
     { label: 'Support queue', href: '/admin/support', icon: CircleHelp, note: 'Reply to customer cases' },
     { label: 'Disputes', href: '/admin/disputes', icon: ShieldCheck, note: 'Review and resolve customer disputes' },
     { label: 'Safety escalations', href: '/admin/escalations', icon: MessageCircle, note: 'Join urgent trip mediation' },

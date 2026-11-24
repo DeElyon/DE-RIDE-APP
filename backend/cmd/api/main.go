@@ -171,6 +171,7 @@ func main() {
 	registerTripRoutes(secure, db)
 	registerTripLifecycleRoutes(secure, db)
 	registerGPSTelemetryRoutes(secure, db)
+	registerRoleSecurityRoutes(secure, db)
 	secure.Get("/me", func(c *fiber.Ctx) error {
 		me := c.Locals("identity").(identity)
 		_, _ = db.Exec(c.UserContext(), `INSERT INTO wallet_accounts(user_id,balance_ngn) VALUES($1,0) ON CONFLICT(user_id) DO NOTHING`, me.UserID)
@@ -351,13 +352,24 @@ func main() {
 		}
 		defer tx.Rollback(c.UserContext())
 		var biker, dispatch bool
+		var roles []string
 		var active int
-		err = tx.QueryRow(c.UserContext(), `SELECT biker_approved,dispatch_approved FROM users WHERE id=$1 FOR UPDATE`, me.UserID).Scan(&biker, &dispatch)
+		err = tx.QueryRow(c.UserContext(), `SELECT biker_approved,dispatch_approved,roles FROM users WHERE id=$1 FOR UPDATE`, me.UserID).Scan(&biker, &dispatch, &roles)
 		if err != nil {
 			return c.Status(404).JSON(errJSON("ERR_USER_NOT_FOUND"))
 		}
 		if in.Mode == "BIKER" && !biker || in.Mode == "DISPATCH_RIDER" && !dispatch {
 			return c.Status(403).JSON(errJSON("ERR_RIDER_MODE_NOT_APPROVED"))
+		}
+		granted := false
+		for _, r := range roles {
+			if r == in.Mode {
+				granted = true
+				break
+			}
+		}
+		if !granted {
+			return c.Status(403).JSON(errJSON("ERR_ROLE_NOT_GRANTED"))
 		}
 		if err = tx.QueryRow(c.UserContext(), `SELECT (SELECT count(*) FROM ride_orders WHERE biker_id=$1 AND status IN ('ACCEPTED','IN_PROGRESS'))+(SELECT count(*) FROM parcel_orders WHERE rider_id=$1 AND status IN ('ACCEPTED','IN_PROGRESS'))`, me.UserID).Scan(&active); err != nil {
 			return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
@@ -368,22 +380,14 @@ func main() {
 		if _, err = tx.Exec(c.UserContext(), `UPDATE users SET active_role=$2 WHERE id=$1`, me.UserID, in.Mode); err != nil {
 			return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
 		}
-		if err = tx.Commit(c.UserContext()); err != nil {
-			return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
-		}
-		if _, err = db.Exec(c.UserContext(), `UPDATE auth_refresh_tokens SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL`, me.UserID); err != nil {
+		if _, err = tx.Exec(c.UserContext(), `UPDATE auth_refresh_tokens SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL`, me.UserID); err != nil {
 			return c.Status(500).JSON(errJSON("ERR_SESSION_REVOKE"))
 		}
-		newTx, err := db.Begin(c.UserContext())
-		if err != nil {
-			return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
-		}
-		defer newTx.Rollback(c.UserContext())
-		pair, err := createTokenPair(c.UserContext(), newTx, me.UserID, in.Mode)
+		pair, err := createTokenPair(c.UserContext(), tx, me.UserID, in.Mode)
 		if err != nil {
 			return c.Status(500).JSON(errJSON("ERR_TOKEN_ISSUE"))
 		}
-		if err = newTx.Commit(c.UserContext()); err != nil {
+		if err = tx.Commit(c.UserContext()); err != nil {
 			return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
 		}
 		pair["active_role"] = in.Mode
@@ -493,19 +497,40 @@ func authenticate(secret string, db *pgxpool.Pool) fiber.Handler {
 		}
 		var activeRole string
 		var roles []string
-		var bikerApproved,dispatchApproved bool
+		var bikerApproved, dispatchApproved bool
 		var suspendedAt *time.Time
-		if err := db.QueryRow(c.UserContext(), `SELECT active_role,roles,biker_approved,dispatch_approved,suspended_at FROM users WHERE id=$1`, sub).Scan(&activeRole,&roles,&bikerApproved,&dispatchApproved,&suspendedAt); err != nil {
+		if err := db.QueryRow(c.UserContext(), `SELECT active_role,roles,biker_approved,dispatch_approved,suspended_at FROM users WHERE id=$1`, sub).Scan(&activeRole, &roles, &bikerApproved, &dispatchApproved, &suspendedAt); err != nil {
 			return c.Status(401).JSON(errJSON("ERR_USER_NOT_FOUND"))
 		}
 		if activeRole != role {
 			return c.Status(401).JSON(errJSON("ERR_STALE_ROLE_TOKEN"))
 		}
-		if suspendedAt!=nil{return c.Status(403).JSON(errJSON("ERR_ACCOUNT_SUSPENDED"))}
-		granted:=false;for _,grantedRole:=range roles{if grantedRole==activeRole{granted=true;break}};if !granted{return c.Status(403).JSON(errJSON("ERR_ROLE_NOT_GRANTED"))}
-		if activeRole=="BIKER"&&!bikerApproved{return c.Status(403).JSON(errJSON("ERR_BIKER_KYC_REQUIRED"))}
-		if activeRole=="DISPATCH_RIDER"&&!dispatchApproved{return c.Status(403).JSON(errJSON("ERR_DISPATCH_KYC_INCOMPLETE"))}
-		if activeRole=="DISPATCHER"||activeRole=="PARK_OPERATOR"{var assigned bool;err:=db.QueryRow(c.UserContext(),`SELECT EXISTS(SELECT 1 FROM trip_operator_assignments WHERE user_id=$1) OR EXISTS(SELECT 1 FROM park_operator_assignments WHERE user_id=$1)`,sub).Scan(&assigned);if err!=nil||!assigned{return c.Status(403).JSON(errJSON("ERR_OPERATIONAL_ASSIGNMENT_REQUIRED"))}}
+		if suspendedAt != nil {
+			return c.Status(403).JSON(errJSON("ERR_ACCOUNT_SUSPENDED"))
+		}
+		granted := false
+		for _, grantedRole := range roles {
+			if grantedRole == activeRole {
+				granted = true
+				break
+			}
+		}
+		if !granted {
+			return c.Status(403).JSON(errJSON("ERR_ROLE_NOT_GRANTED"))
+		}
+		if activeRole == "BIKER" && !bikerApproved {
+			return c.Status(403).JSON(errJSON("ERR_BIKER_KYC_REQUIRED"))
+		}
+		if activeRole == "DISPATCH_RIDER" && !dispatchApproved {
+			return c.Status(403).JSON(errJSON("ERR_DISPATCH_KYC_INCOMPLETE"))
+		}
+		if activeRole == "DISPATCHER" || activeRole == "PARK_OPERATOR" {
+			var assigned bool
+			err := db.QueryRow(c.UserContext(), `SELECT EXISTS(SELECT 1 FROM trip_operator_assignments WHERE user_id=$1) OR EXISTS(SELECT 1 FROM park_operator_assignments WHERE user_id=$1)`, sub).Scan(&assigned)
+			if err != nil || !assigned {
+				return c.Status(403).JSON(errJSON("ERR_OPERATIONAL_ASSIGNMENT_REQUIRED"))
+			}
+		}
 		c.Locals("identity", identity{sub, activeRole})
 		return c.Next()
 	}
