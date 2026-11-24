@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { ArrowDownLeft, ArrowUpRight, BusFront, CircleHelp, Clock3, Compass, LogOut, MapPin, Package, ShieldCheck, Sparkles, Wallet } from 'lucide-react';
+import { ArrowDownLeft, ArrowUpRight, Bell, BusFront, CircleHelp, Clock3, Compass, LogOut, MapPin, Package, ShieldCheck, Sparkles, Wallet } from 'lucide-react';
 import { AccountProfile, apiRequest, signOut } from '@/lib/api-client';
 import { RiderModeSwitcher } from '@/components/rider-mode-switcher';
 
@@ -14,11 +14,11 @@ type RoleConfig = { title: string; subtitle: string; icon: typeof BusFront; link
 const configs: Record<string, RoleConfig> = {
   PASSENGER: { title: 'Passenger dashboard', subtitle: 'Your journeys, account and travel tools in one place.', icon: Compass, links: [
     { label: 'Explore registered parks', href: '/passenger/explore', icon: MapPin, note: 'Browse park locations and launch hubs' },
-    { label: 'Trip support', href: 'mailto:elversetechnologies@gmail.com', icon: CircleHelp, note: 'Get help with a booking or account' },
+    { label: 'Trip support', href: '/support', icon: CircleHelp, note: 'Get help with a booking or account' },
   ] },
   DRIVER: { title: 'Driver dashboard', subtitle: 'Keep your profile ready for assigned trips and service updates.', icon: BusFront, links: [
     { label: 'Driver workspace', href: '/driver/dashboard', icon: BusFront, note: 'Trip and vehicle tools' },
-    { label: 'Safety and support', href: 'mailto:elversetechnologies@gmail.com', icon: ShieldCheck, note: 'Contact the DE RIDE team' },
+    { label: 'Safety and support', href: '/support', icon: ShieldCheck, note: 'Contact the DE RIDE team' },
   ] },
   BIKER: { title: 'Biker dashboard', subtitle: 'Your rider profile, account balance and service access.', icon: Compass, links: [
     { label: 'Biker radar', href: '/biker/radar', icon: MapPin, note: 'Open your rider workspace' },
@@ -26,15 +26,15 @@ const configs: Record<string, RoleConfig> = {
   ] },
   DISPATCH_RIDER: { title: 'Dispatch rider dashboard', subtitle: 'Your delivery profile and account at a glance.', icon: Package, links: [
     { label: 'Deliveries', href: '/dispatch-rider/deliveries', icon: Package, note: 'Open the dispatch workspace' },
-    { label: 'Rider support', href: 'mailto:elversetechnologies@gmail.com', icon: CircleHelp, note: 'Contact the DE RIDE team' },
+    { label: 'Rider support', href: '/support', icon: CircleHelp, note: 'Contact the DE RIDE team' },
   ] },
   DISPATCHER: { title: 'Dispatcher dashboard', subtitle: 'Terminal operations and account information.', icon: BusFront, links: [
     { label: 'Terminal workspace', href: '/park-operator/terminal', icon: MapPin, note: 'Open assigned terminal tools' },
-    { label: 'Operations support', href: 'mailto:elversetechnologies@gmail.com', icon: CircleHelp, note: 'Contact the DE RIDE team' },
+    { label: 'Operations support', href: '/support', icon: CircleHelp, note: 'Contact the DE RIDE team' },
   ] },
   PARK_OPERATOR: { title: 'Park operator dashboard', subtitle: 'Terminal operations and account information.', icon: BusFront, links: [
     { label: 'Terminal workspace', href: '/park-operator/terminal', icon: MapPin, note: 'Open park management tools' },
-    { label: 'Operations support', href: 'mailto:elversetechnologies@gmail.com', icon: CircleHelp, note: 'Contact the DE RIDE team' },
+    { label: 'Operations support', href: '/support', icon: CircleHelp, note: 'Contact the DE RIDE team' },
   ] },
   ADMIN: { title: 'Admin dashboard', subtitle: 'Account and command tools for DE RIDE administration.', icon: ShieldCheck, links: [
     { label: 'Command map', href: '/admin/command-map', icon: MapPin, note: 'Open administration tools' },
@@ -101,6 +101,9 @@ export function AppDashboard({ requiredRole }: { requiredRole?: string }) {
       <div className="account-nav-label">YOUR WORKSPACE</div>
       <Link className="account-nav-active" href={path || '/'}><Icon size={18}/>{config.title}</Link>
       <Link className="account-nav-link" href="/"><Compass size={18}/>Back to explore</Link>
+      <Link className="account-nav-link" href="/wallet"><Wallet size={18}/>Wallet</Link>
+      <Link className="account-nav-link" href="/transactions"><ArrowDownLeft size={18}/>Transactions</Link>
+      <Link className="account-nav-link" href="/notifications"><Bell size={18}/>Notifications</Link>
       <div className="account-rail-bottom"><ShieldCheck size={17}/><span>Secure account<br/><small>Session protected</small></span></div>
     </aside>
     <section className="account-main">

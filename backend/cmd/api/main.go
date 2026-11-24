@@ -48,7 +48,7 @@ func main() {
 	store := cache.NewMemoryStore(30 * time.Second)
 	defer store.Close()
 	hub := realtime.NewHub()
-	app := fiber.New(fiber.Config{AppName: "DE RIDE API", ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, BodyLimit: 2 * 1024 * 1024})
+	app := fiber.New(fiber.Config{AppName: "DE RIDE API", ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, BodyLimit: 6 * 1024 * 1024})
 	origins := strings.TrimSpace(os.Getenv("ALLOWED_ORIGINS"))
 	if origins == "" {
 		origins = "http://localhost:3000"
@@ -63,6 +63,21 @@ func main() {
 	go purgeExpiredTripMessages(db)
 	v1 := app.Group("/api/v1")
 	registerAuthRoutes(v1, db)
+	go processExpiredMedia(db)
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			processExpiredMedia(db)
+		}
+	}()
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			processPendingPaystackEvents(db)
+		}
+	}()
 	v1.Get("/health", func(c *fiber.Ctx) error {
 		probe, done := context.WithTimeout(c.UserContext(), 2*time.Second)
 		defer done()
@@ -108,6 +123,12 @@ func main() {
 		return c.JSON(fiber.Map{"active_parks": active, "nationwide_parks": nationwide, "verified_buses": boarding, "online_riders": onlineRiders, "average_wait_saved": waitMinutes})
 	})
 	secure := v1.Group("", authenticate(os.Getenv("JWT_ACCESS_SECRET"), db))
+	registerMediaRoutes(secure, db)
+	registerPaymentRoutes(v1, secure, db)
+	registerFinanceFlowRoutes(secure, db)
+	registerAccountRoutes(secure, db)
+	registerKYCRoutes(secure, db)
+	registerSupportRoutes(secure, db)
 	secure.Get("/me", func(c *fiber.Ctx) error {
 		me := c.Locals("identity").(identity)
 		_, _ = db.Exec(c.UserContext(), `INSERT INTO wallet_accounts(user_id,balance_ngn) VALUES($1,0) ON CONFLICT(user_id) DO NOTHING`, me.UserID)

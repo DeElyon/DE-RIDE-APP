@@ -1,6 +1,6 @@
 # DE RIDE ecosystem
 
-DE RIDE is a multi-role Nigerian mobility platform monorepo. It contains a Next.js PWA, Go/Fiber API, FastAPI Amebo AI service, and PostgreSQL/PostGIS migrations. The repository is a runnable foundation; integrations that require credentials and several operational flows remain unavailable until their handlers and provider configuration are completed.
+DE RIDE is a multi-role Nigerian mobility platform monorepo. It contains a Next.js PWA, Go/Fiber API, FastAPI Amebo AI service, and PostgreSQL/PostGIS migrations. Account/session flows, Cloudinary media lifecycle, Paystack wallet funding, wallet ticket checkout/refunds, wallet subscription changes, signed receipts, notification inbox/push, KYC review, and customer support case creation are implemented. Provider-backed ticket checkout/refunds, recurring subscription billing, VTU vending, and other outstanding capabilities are tracked in `backend/API.md`.
 
 ## Local development
 
@@ -20,9 +20,9 @@ The current Go API implements database health, park reads, Argon2id password reg
 
 ## Financial and safety invariants
 
-The fare helper defines the local Paystack estimate as 1.5% + ₦100, waiving ₦100 below ₦2,500 and capping the local fee at ₦2,000. Provider verification must precede settlement. Fare refund percentages are 100%, 80%, and 40%; platform and Paystack fees are excluded. These rules are documented as requirements; end-to-end checkout, settlement, refunds, and ledger handlers are not yet wired into the API.
+The fare helper defines the local Paystack estimate as 1.5% + ₦100, waiving ₦100 below ₦2,500 and capping the local fee at ₦2,000. Ticket refunds currently return 100%, 80%, or 40% of base fare to the DE RIDE wallet; platform and Paystack fees are excluded. Wallet ticket checkout/refund and subscription changes use transactional ledger writes. Paystack wallet funding settles only after provider verification.
 
-Memory cache and websocket state are process-local and must not be used as a financial source of truth. The API exposes authenticated trip chat and an in-process WebSocket hub, with a six-minute message purge worker. Multi-instance deployment needs shared pub/sub or sticky routing for realtime rooms. Wallet reads are ledger-backed; payment-backed wallet funding and other financial mutations remain disabled until provider verification and idempotent settlement handlers are implemented.
+Memory cache and websocket state are process-local and must not be used as a financial source of truth. The API exposes authenticated trip chat and an in-process WebSocket hub, with a six-minute message purge worker. Multi-instance deployment needs shared pub/sub or sticky routing for realtime rooms. See `backend/API.md` for provider-backed flows that remain incomplete.
 
 ## Deployment
 
@@ -34,4 +34,4 @@ In-memory cache and WebSocket room membership are per Render process and have no
 
 GitHub Actions run service checks, and `.github/workflows/create-delete-neon-branch.yml` creates expiring PR branches and removes them when PRs close. Set `NEON_PROJECT_ID` as a repository variable and `NEON_API_KEY` as a repository secret.
 
-See `backend/API.md` for the implemented API surface and gaps, and `database/migrations` for schema rules. Do not enable live payments or production routing until the missing transactional handlers, provider webhooks, KYC review, and operational park data have been implemented and reviewed.
+See `backend/API.md` for implemented APIs, operational dependencies, and remaining workflow gaps; see `database/migrations` for schema rules. Configure verified park data, Cloudinary, Paystack, receipt signing, VAPID, and SMTP before production use. Do not expose unfinished provider-backed flows as completed features.

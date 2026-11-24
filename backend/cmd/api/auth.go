@@ -28,20 +28,22 @@ var allowedRegistrationRoles = map[string]bool{"PASSENGER": true, "DRIVER": true
 func registerAuthRoutes(v1 fiber.Router, db *pgxpool.Pool) {
 	v1.Post("/auth/register", func(c *fiber.Ctx) error {
 		var body struct {
-			Name     string `json:"name"`
-			Email    string `json:"email"`
-			Password string `json:"password"`
-			Role     string `json:"role"`
+			Name        string `json:"name"`
+			Email       string `json:"email"`
+			PhoneNumber string `json:"phone_number"`
+			Password    string `json:"password"`
+			Role        string `json:"role"`
 		}
 		if err := c.BodyParser(&body); err != nil {
 			return c.Status(400).JSON(errJSON("ERR_INVALID_REQUEST"))
 		}
 		body.Email = strings.ToLower(strings.TrimSpace(body.Email))
+		body.PhoneNumber = normalizeNigerianPhone(body.PhoneNumber)
 		body.Role = strings.ToUpper(strings.TrimSpace(body.Role))
 		if body.Role == "" {
 			body.Role = "PASSENGER"
 		}
-		if _, err := mail.ParseAddress(body.Email); err != nil || len(body.Password) < 10 || len(body.Password) > 128 || !allowedRegistrationRoles[body.Role] || len(body.Name) > 120 {
+		if _, err := mail.ParseAddress(body.Email); err != nil || body.PhoneNumber == "" || len(body.Password) < 10 || len(body.Password) > 128 || !allowedRegistrationRoles[body.Role] || len(body.Name) > 120 {
 			return c.Status(400).JSON(errJSON("ERR_INVALID_REGISTRATION"))
 		}
 		if len(os.Getenv("JWT_ACCESS_SECRET")) < 32 || len(os.Getenv("JWT_REFRESH_SECRET")) < 32 {
@@ -61,7 +63,7 @@ func registerAuthRoutes(v1 fiber.Router, db *pgxpool.Pool) {
 		}
 		defer tx.Rollback(c.UserContext())
 		var userID string
-		err = tx.QueryRow(c.UserContext(), `INSERT INTO users(email,password_hash,active_role,roles,display_name) VALUES($1,$2,$3,ARRAY[$3]::text[],$4) RETURNING id`, body.Email, digest, body.Role, strings.TrimSpace(body.Name)).Scan(&userID)
+		err = tx.QueryRow(c.UserContext(), `INSERT INTO users(email,password_hash,active_role,roles,display_name,phone_number) VALUES($1,$2,$3,ARRAY[$3]::text[],$4,$5) RETURNING id`, body.Email, digest, body.Role, strings.TrimSpace(body.Name), body.PhoneNumber).Scan(&userID)
 		if err != nil {
 			return c.Status(409).JSON(errJSON("ERR_EMAIL_ALREADY_REGISTERED"))
 		}
@@ -337,6 +339,30 @@ func otpHash(code string) string {
 	mac.Write([]byte(code))
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
+
+func normalizeNigerianPhone(value string) string {
+	value = strings.TrimSpace(value)
+	var digits strings.Builder
+	for _, char := range value {
+		if char >= '0' && char <= '9' {
+			digits.WriteRune(char)
+			continue
+		}
+		if char == '+' || char == ' ' || char == '-' || char == '(' || char == ')' {
+			continue
+		}
+		return ""
+	}
+	number := digits.String()
+	if strings.HasPrefix(number, "0") && len(number) == 11 {
+		number = "234" + number[1:]
+	}
+	if strings.HasPrefix(number, "234") && len(number) >= 13 && len(number) <= 15 {
+		return "+" + number
+	}
+	return ""
+}
+
 func sendOTP(to, code string) error {
 	host := os.Getenv("SMTP_HOST")
 	user := os.Getenv("SMTP_USER")

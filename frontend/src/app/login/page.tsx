@@ -11,6 +11,7 @@ const api = (process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8080/api/
 
 export default function Login() {
   const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
   const [otp, setOtp] = useState('');
@@ -29,7 +30,7 @@ export default function Login() {
     event.preventDefault(); setBusy(true); setMessage('');
     try {
       const path = mode === 'sign-up' ? '/auth/register' : mode === 'verify' ? '/auth/verify-otp' : '/auth/login';
-      const body = mode === 'sign-up' ? { email, password, name, role } : mode === 'verify' ? { email, code: otp } : { email, password };
+      const body = mode === 'sign-up' ? { email, phone_number: phone, password, name, role } : mode === 'verify' ? { email, code: otp } : { email, password };
       const response = await fetch(`${api}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.message || result.error || result.detail || 'Request failed. Please try again.');
@@ -49,7 +50,7 @@ export default function Login() {
     <section className="auth-visual"><Link href="/" className="auth-brand"><span>DR</span><b>DE <i>RIDE</i><small>MOVE WITH CONFIDENCE</small></b></Link><div className="auth-visual-copy"><span className="auth-overline"><Sparkles size={14}/> YOUR NEXT JOURNEY STARTS HERE</span><h1>More than a ride.<br/><em>A better way to move.</em></h1><p>Plan with confidence, connect with trusted transport teams, and keep every trip detail close at hand.</p><div className="auth-points"><span><ShieldCheck size={17}/> Email-verified accounts</span><span><LockKeyhole size={17}/> Protected sessions</span></div></div><div className="auth-visual-foot">LAGOS <i/> OGUN <i/> ALL NIGERIA</div></section>
     <section className="auth-form-area"><div className="auth-card"><Link href="/" className="auth-back"><ArrowLeft size={16}/> Back to DE RIDE</Link><div className="auth-heading"><span className="auth-overline">{mode === 'verify' ? 'ONE LAST STEP' : mode === 'sign-up' ? 'JOIN THE NETWORK' : 'ACCOUNT ACCESS'}</span><h2>{heading}</h2><p>{mode === 'verify' ? `Enter the verification code sent to ${email || 'your email address'}.` : mode === 'sign-up' ? 'Set up your profile to get started with DE RIDE.' : 'Sign in to continue to your DE RIDE workspace.'}</p></div>
       <form onSubmit={submit} className="auth-form">
-        {mode === 'sign-up' && <label>Full name<input required autoComplete="name" maxLength={120} value={name} onChange={event => setName(event.target.value)} placeholder="Your name"/></label>}
+        {mode === 'sign-up' && <><label>Full name<input required autoComplete="name" maxLength={120} value={name} onChange={event => setName(event.target.value)} placeholder="Your name"/></label><label>Mobile number<input required type="tel" autoComplete="tel" minLength={10} maxLength={18} value={phone} onChange={event => setPhone(event.target.value)} placeholder="+234 801 234 5678"/></label></>}
         <label>Email address<input required type="email" autoComplete="email" value={email} onChange={event => setEmail(event.target.value)} placeholder="name@example.com"/></label>
         {mode !== 'verify' && <>
           {mode === 'sign-up' && <label>How will you use DE RIDE?<select value={role} onChange={event => setRole(event.target.value)}>{roles.map(item => <option key={item} value={item}>{item.replaceAll('_', ' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase())}</option>)}</select></label>}

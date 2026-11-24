@@ -1,20 +1,26 @@
-# API surface and planned contracts
+# API surface
 
-All endpoints are rooted at `/api/v1`. Authenticated routes require a signed access token and an active role claim. Financial mutations must use an idempotency key and commit a database ledger entry in the same transaction as the business status change.
+All routes use `/api/v1`. Authenticated routes require an access token; monetary writes must be idempotent and update durable ledger records transactionally.
 
-| Area | Contract |
-|---|---|
-| Health | `GET /healthz`, `GET /api/v1/health` (implemented) |
-| Parks | `GET /api/v1/parks?state=LA` (implemented; reads configured rows) |
-| Auth | `POST /api/v1/auth/register`, `/auth/verify-otp`, `/auth/login`, `/auth/refresh`, `/auth/logout` (Argon2id passwords, email OTP, rotating HS256 JWT pair, persisted refresh-session revocation) |
-| Profiles | `GET /api/v1/me` (account, verification, wallet and Amebo balances); `POST /api/v1/users/switch-rider-mode` (JWT, approval, active-job and persisted active-role checks; returns a fresh token pair) |
-| Wallet reads | `GET /api/v1/wallet/transactions` (most recent 50 persisted ledger entries) |
-| Trips | `POST /api/v1/trips/:id/capacity` (JWT, assigned role, database 120-second cooldown) |
-| Tickets, orders, wallet mutations, VTU | Planned; checkout, top-ups, refunds, purchases and settlements are not implemented |
-| WebSockets and background workers | Authenticated trip rooms, persisted chat messages, and six-minute post-arrival purge |
+| Area | Routes | Status |
+|---|---|---|
+| Auth/session | `POST /auth/register`, `/auth/verify-otp`, `/auth/login`, `/auth/refresh`, `/auth/logout` | Implemented with Argon2id, one-time email OTP, rotating persisted refresh sessions, and session-bound access tokens |
+| Profile | `GET /me`, `POST /users/switch-rider-mode` | Implemented; switch requires both approvals and no active job |
+| Parks/trips | `GET /parks`, `/parks/summary`, `POST /trips/:id/capacity` | Directory and database-backed 120-second capacity lock implemented |
+| Cloudinary | `POST /media/cloudinary-sign`, `/media/cloudinary-confirm`, `GET /media/:id/access` | Signed authenticated uploads, server verification, compressed incoming transformations, short-lived reviewer/owner download URLs; KYC retained, other assets expire after 30 days |
+| KYC | `POST /vehicle-registrations`, `GET /admin/kyc/queue`, `POST /admin/kyc/:registrationID/review` | Vehicle submission, ownership-checked assets, reviews, role approval and notifications implemented |
+| Wallet funding | `POST /wallet/fund`, `GET /payments/verify`, `POST /webhooks/paystack` | Paystack initialization, verification before settlement, event persistence, async retry worker, wallet ledger and signed receipt implemented |
+| Account activity | `GET /wallet/transactions`, `/transactions`, `/transactions/:id/receipt`, `/notifications`; `PATCH /notifications/:id/read`, `POST /notifications/read-all` | Read APIs implemented; signed receipts exist for verified wallet funding, wallet ticket purchases/refunds, and paid subscriptions. The transaction feed exposes all ledger categories and signed receipts |
+| Push | `POST/DELETE /push-subscriptions/:id` (POST path omits `:id`) | VAPID Web Push subscription and wallet/KYC event delivery implemented |
+| Support/disputes | `GET/POST /support/cases`, `GET/POST /support/cases/:caseID/messages`, `POST /disputes` | Customer case creation, correspondence, and dispute filing implemented |
+| Realtime | `POST /ws-ticket`, `GET /ws?ticket=...` | Authenticated WebSocket trip chat and six-minute post-arrival purge implemented |
 
-The browser obtains a 30-second WebSocket ticket with authenticated `POST /api/v1/ws-ticket`, then connects to `GET /api/v1/ws?ticket=...`. `frontend/src/lib/api-client.ts` provides `openAuthenticatedWebSocket()`. Join a trip with `{"event":"room:join","trip_id":"..."}` and send chat with `{"event":"chat:send_message","trip_id":"...","content":"..."}`. Trip access is restricted to its assigned driver and ticketed passengers. Room membership is process-local; deploy one API instance until a shared realtime transport is added. Migration `012_realtime_lifecycle.sql` adds `trips.arrived_at`, which must be set when a trip is marked arrived for six-minute cleanup to run.
+**Implemented with limits:** Ticket checkout and ticket refunds currently settle to/from the DE RIDE wallet only. Subscription upgrades debit the wallet and downgrades to an eligible free plan take effect immediately; upgrades do not yet use recurring Paystack billing. Customer support case creation and replies are available, but admin replies and dispute adjudication are not. The support page currently lists cases without opening their message threads.
 
-Error envelope: `{"error":"ERR_CODE","message":"...","retry_after_seconds":120}`. Capacity edits return HTTP 429 `ERR_CAPACITY_COOLDOWN_ACTIVE`. The database constrains the ₦60,000 one-time plan to the PASSENGER role; a purchase endpoint is not implemented yet. Rider-mode switching requires both approved registrations and no in-progress ride or delivery. GPS opt-in and source precedence HARDWARE > DRIVER_APP > DISPATCHER_APP > MANUAL remain schema/product requirements; telemetry endpoints are not implemented.
+**Not yet implemented:** Paystack-backed ticket checkout and original-funding refunds; Paystack-backed subscription billing; Amebo token purchases and metering; VTU plan/purchase integration; admin support replies/dispute adjudication; rank prize settlement; GPS telemetry and full rider-order APIs. These flows must not be represented as completed in product UI until their provider and settlement handlers exist.
 
-All authenticated routes currently use `JWT_ACCESS_SECRET` HS256 access tokens. Registration requires a valid SMTP configuration to deliver OTPs; email verification and login issue one-hour access tokens and 30-day rotating refresh tokens. Refresh tokens are persisted, single-use, and invalidated on rotation. Access tokens are bound to the refresh session, so logout and rotation revoke their use immediately. The mode-switch operation revokes prior sessions and returns a fresh token pair. Financial mutations must never return simulated success; checkout, wallet funding, refunds, VTU orders, subscriptions, token accounting, and provider webhooks remain unimplemented.
+For media uploads, configure a signed Cloudinary upload preset with strict 5 MB limits, supported formats, authenticated delivery, and incoming transformation policies. Image incoming transformations apply before storage; PDF documents are size-validated but remain their original file format. KYC assets have no automatic expiry; non-KYC media is removed by the hourly worker after 30 days.
+
+For payments, configure `PAYSTACK_SECRET_KEY`, webhook signing secrets, `QR_PRIVATE_KEY_PEM`, and `QR_KEY_ID`. The webhook handler authenticates the raw request body, records the event, acknowledges it, and uses a retryable worker; the worker verifies the transaction with Paystack before crediting the wallet. Never trust a browser callback as proof of payment.
+
+The process-local WebSocket hub and in-memory cooldown/cache are per instance. Run a single API instance until shared realtime/cache infrastructure is intentionally introduced. Financial and KYC records remain durable in Neon Postgres.
