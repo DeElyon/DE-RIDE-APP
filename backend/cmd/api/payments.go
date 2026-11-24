@@ -79,17 +79,29 @@ func registerPaymentRoutes(v1, secure fiber.Router, db *pgxpool.Pool) {
 		if reference == "" {
 			return c.Status(400).JSON(errJSON("ERR_PAYMENT_REFERENCE_REQUIRED"))
 		}
-		var intentID, intentStatus string
+		var intentID, intentStatus, intentType string
 		var amount int64
-		if err := db.QueryRow(c.UserContext(), `SELECT id,status,amount_kobo FROM payment_intents WHERE user_id=$1 AND provider_reference=$2 AND intent_type='WALLET_FUNDING'`, me.UserID, reference).Scan(&intentID, &intentStatus, &amount); err != nil {
+		if err := db.QueryRow(c.UserContext(), `SELECT id,status,amount_kobo,intent_type FROM payment_intents WHERE user_id=$1 AND provider_reference=$2 AND intent_type IN ('WALLET_FUNDING','TICKET_CHECKOUT')`, me.UserID, reference).Scan(&intentID, &intentStatus, &amount, &intentType); err != nil {
 			return c.Status(404).JSON(errJSON("ERR_PAYMENT_NOT_FOUND"))
 		}
 		if intentStatus != "SUCCEEDED" {
-			if err := verifyAndSettleWalletFunding(c.UserContext(), db, reference); err != nil {
+			var settleErr error
+			if intentType == "WALLET_FUNDING" {
+				settleErr = verifyAndSettleWalletFunding(c.UserContext(), db, reference)
+			} else {
+				settleErr = verifyAndSettleTicketCheckout(c.UserContext(), db, reference)
+			}
+			if settleErr != nil {
 				return c.Status(409).JSON(errJSON("ERR_PAYMENT_NOT_SETTLED"))
 			}
 		}
-		return c.JSON(fiber.Map{"status": "SUCCEEDED", "reference": reference, "amount_ngn": amount / 100, "payment_intent_id": intentID})
+		result := fiber.Map{"status": "SUCCEEDED", "reference": reference, "amount_ngn": amount / 100, "payment_intent_id": intentID}
+		if intentType == "TICKET_CHECKOUT" {
+			var ticketID string
+			_ = db.QueryRow(c.UserContext(), `SELECT purpose_id::text FROM payment_intents WHERE id=$1`, intentID).Scan(&ticketID)
+			result["ticket_id"] = ticketID
+		}
+		return c.JSON(result)
 	})
 	v1.Post("/webhooks/paystack", func(c *fiber.Ctx) error {
 		if os.Getenv("PAYSTACK_SECRET_KEY") == "" {
@@ -131,10 +143,25 @@ func processPaystackWebhookEvent(db *pgxpool.Pool, eventID string) {
 		return
 	}
 	if eventType == "charge.success" {
-		if err = verifyAndSettleWalletFunding(ctx, db, reference); err != nil {
+		var intentType string
+		if err = db.QueryRow(ctx, `SELECT intent_type FROM payment_intents WHERE provider_reference=$1`, reference).Scan(&intentType); err != nil {
 			_, _ = db.Exec(ctx, `UPDATE paystack_webhook_events SET processing_at=NULL,processing_error=$1 WHERE event_id=$2`, err.Error(), eventID)
 			return
 		}
+		if intentType == "WALLET_FUNDING" {
+			err = verifyAndSettleWalletFunding(ctx, db, reference)
+		} else if intentType == "TICKET_CHECKOUT" {
+			err = verifyAndSettleTicketCheckout(ctx, db, reference)
+		} else {
+			err = fmt.Errorf("unsupported Paystack intent type")
+		}
+		if err != nil {
+			_, _ = db.Exec(ctx, `UPDATE paystack_webhook_events SET processing_at=NULL,processing_error=$1 WHERE event_id=$2`, err.Error(), eventID)
+			return
+		}
+	} else if eventType == "charge.failed" {
+		_, _ = db.Exec(ctx, `UPDATE payment_intents SET status='FAILED',updated_at=now() WHERE provider_reference=$1 AND status IN ('CREATED','PENDING')`, reference)
+		_, _ = db.Exec(ctx, `UPDATE tickets SET status='CANCELLED' WHERE id=(SELECT purpose_id FROM payment_intents WHERE provider_reference=$1 AND intent_type='TICKET_CHECKOUT') AND status='PENDING'`, reference)
 	}
 	_, _ = db.Exec(ctx, `UPDATE paystack_webhook_events SET processed_at=now(),processing_at=NULL,processing_error=NULL WHERE event_id=$1`, eventID)
 }
@@ -158,6 +185,34 @@ func processPendingPaystackEvents(db *pgxpool.Pool) {
 	for _, id := range ids {
 		processPaystackWebhookEvent(db, id)
 	}
+}
+
+func processExpiredTicketCheckouts(db *pgxpool.Pool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `SELECT id,purpose_id FROM payment_intents WHERE intent_type='TICKET_CHECKOUT' AND status IN ('CREATED','PENDING','FAILED') AND expires_at<=now() ORDER BY expires_at LIMIT 50 FOR UPDATE SKIP LOCKED`)
+	if err != nil {
+		return
+	}
+	type expired struct{ intent, ticket string }
+	items := make([]expired, 0)
+	for rows.Next() {
+		var x expired
+		if rows.Scan(&x.intent, &x.ticket) == nil {
+			items = append(items, x)
+		}
+	}
+	rows.Close()
+	for _, x := range items {
+		_, _ = tx.Exec(ctx, `UPDATE payment_intents SET status='CANCELLED',updated_at=now() WHERE id=$1`, x.intent)
+		_, _ = tx.Exec(ctx, `UPDATE tickets SET status='CANCELLED' WHERE id=$1 AND status='PENDING'`, x.ticket)
+	}
+	_ = tx.Commit(ctx)
 }
 
 func verifyPaystackWebhookSignature(body []byte, currentHeader, legacyHeader string) bool {
@@ -295,6 +350,59 @@ func createWalletFundingIntent(ctx context.Context, db *pgxpool.Pool, userID, em
 	return intentID, reference, provider.Data.AuthorizationURL, provider.Data.AccessCode, "PENDING", err
 }
 
+func initializeExistingPaystackIntent(ctx context.Context, db *pgxpool.Pool, intentID, userID, email, reference string, amountKobo int64, purpose string) (string, string, error) {
+	var savedURL, savedCode *string
+	var status string
+	if err := db.QueryRow(ctx, `SELECT status,authorization_url,access_code FROM payment_intents WHERE id=$1 AND user_id=$2 AND provider_reference=$3 AND intent_type=$4`, intentID, userID, reference, purpose).Scan(&status, &savedURL, &savedCode); err != nil {
+		return "", "", err
+	}
+	if savedURL != nil && status == "PENDING" {
+		return *savedURL, stringValue(savedCode), nil
+	}
+	if status != "CREATED" && status != "PENDING" {
+		return "", "", fmt.Errorf("payment intent is not initializable")
+	}
+	frontend := strings.TrimRight(os.Getenv("PUBLIC_FRONTEND_URL"), "/")
+	if frontend == "" {
+		frontend = "http://localhost:3000"
+	}
+	callback := frontend + "/wallet?payment=return"
+	if purpose == "TICKET_CHECKOUT" {
+		callback = frontend + "/tickets?payment=return"
+	}
+	body, _ := json.Marshal(map[string]any{"email": email, "amount": amountKobo, "reference": reference, "currency": "NGN", "callback_url": callback, "metadata": map[string]any{"intent_id": intentID, "purpose": purpose, "user_id": userID}})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.paystack.co/transaction/initialize", strings.NewReader(string(body)))
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+os.Getenv("PAYSTACK_SECRET_KEY"))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	var provider paystackInitializeResponse
+	if err = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&provider); err != nil {
+		return "", "", err
+	}
+	if resp.StatusCode >= 500 {
+		return "", "", fmt.Errorf("provider initialization outcome is ambiguous")
+	}
+	if resp.StatusCode >= 400 || !provider.Status {
+		_, _ = db.Exec(ctx, `UPDATE payment_intents SET status='FAILED',updated_at=now() WHERE id=$1`, intentID)
+		if purpose == "TICKET_CHECKOUT" {
+			_, _ = db.Exec(ctx, `UPDATE tickets SET status='CANCELLED' WHERE id=(SELECT purpose_id FROM payment_intents WHERE id=$1) AND status='PENDING'`, intentID)
+		}
+		return "", "", fmt.Errorf("provider rejected initialization")
+	}
+	if provider.Data.Reference != reference || provider.Data.AuthorizationURL == "" {
+		return "", "", fmt.Errorf("provider initialization reference could not be verified")
+	}
+	_, err = db.Exec(ctx, `UPDATE payment_intents SET status='PENDING',authorization_url=$1,access_code=$2,expires_at=now()+interval '30 minutes',updated_at=now() WHERE id=$3 AND status IN ('CREATED','PENDING')`, provider.Data.AuthorizationURL, provider.Data.AccessCode, intentID)
+	return provider.Data.AuthorizationURL, provider.Data.AccessCode, err
+}
+
 func verifyAndSettleWalletFunding(ctx context.Context, db *pgxpool.Pool, reference string) error {
 	secret := os.Getenv("PAYSTACK_SECRET_KEY")
 	if secret == "" {
@@ -376,6 +484,78 @@ func verifyAndSettleWalletFunding(ctx context.Context, db *pgxpool.Pool, referen
 		return err
 	}
 	go sendPushNotificationToUser(db, userID, "Wallet funded", "Your DE RIDE wallet has been credited.", "/transactions")
+	return nil
+}
+
+func verifyAndSettleTicketCheckout(ctx context.Context, db *pgxpool.Pool, reference string) error {
+	secret := os.Getenv("PAYSTACK_SECRET_KEY")
+	if secret == "" {
+		return fmt.Errorf("payment provider is not configured")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.paystack.co/transaction/verify/"+url.PathEscape(reference), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+secret)
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	var verified paystackVerifyResponse
+	if err = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&verified); err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || !verified.Status || verified.Data.Status != "success" || verified.Data.Reference != reference || verified.Data.Currency != "NGN" {
+		return fmt.Errorf("provider transaction is not successful")
+	}
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var intentID, userID, ticketID, status string
+	var amount int64
+	if err = tx.QueryRow(ctx, `SELECT id,user_id,purpose_id,amount_kobo,status FROM payment_intents WHERE provider_reference=$1 AND intent_type='TICKET_CHECKOUT' FOR UPDATE`, reference).Scan(&intentID, &userID, &ticketID, &amount, &status); err != nil {
+		return err
+	}
+	if amount != verified.Data.Amount {
+		return fmt.Errorf("verified amount mismatch")
+	}
+	if status == "SUCCEEDED" {
+		return tx.Commit(ctx)
+	}
+	if status != "PENDING" && status != "CREATED" {
+		return fmt.Errorf("ticket payment is not settleable")
+	}
+	var ticketStatus, manualCode, checkoutKey string
+	var total int64
+	if err = tx.QueryRow(ctx, `SELECT status,manual_code,checkout_key,total_paid_ngn FROM tickets WHERE id=$1 AND passenger_id=$2 FOR UPDATE`, ticketID, userID).Scan(&ticketStatus, &manualCode, &checkoutKey, &total); err != nil {
+		return err
+	}
+	if ticketStatus != "PENDING" || total*100 != amount {
+		return fmt.Errorf("ticket reservation is invalid")
+	}
+	ledgerID, err := insertLedger(ctx, tx, userID, "ticket:"+userID+":"+checkoutKey, -total, "TICKET_PURCHASE")
+	if err != nil {
+		return err
+	}
+	claims := map[string]any{"receipt_id": ledgerID, "ticket_id": ticketID, "reference": reference, "user_id": userID, "type": "TICKET_PURCHASE", "amount_ngn": total, "currency": "NGN", "issued_at": time.Now().UTC().Format(time.RFC3339)}
+	if err = storeSignedReceipt(ctx, tx, userID, "TICKET_PURCHASE", ledgerID, claims); err != nil {
+		return err
+	}
+	if _,err=tx.Exec(ctx,`UPDATE signed_receipts SET payment_intent_id=$1 WHERE ledger_entry_id=$2`,intentID,ledgerID);err!=nil{return err}
+	if _, err = tx.Exec(ctx, `UPDATE tickets SET status='CONFIRMED' WHERE id=$1`, ticketID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE payment_intents SET status='SUCCEEDED',settled_at=now(),updated_at=now() WHERE id=$1`, intentID); err != nil {
+		return err
+	}
+	_, _ = tx.Exec(ctx, `INSERT INTO app_notifications(user_id,category,title,body,action_url,payload) VALUES($1,'TRIP','Ticket confirmed',$2,'/tickets',jsonb_build_object('ticket_id',$3))`, userID, "Your ticket is confirmed. Boarding code: "+manualCode, ticketID)
+	if err = tx.Commit(ctx); err != nil {
+		return err
+	}
+	go sendPushNotificationToUser(db, userID, "Ticket confirmed", "Your ticket is ready to board.", "/tickets")
 	return nil
 }
 

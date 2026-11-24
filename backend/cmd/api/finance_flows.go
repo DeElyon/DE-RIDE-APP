@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,21 +16,68 @@ import (
 )
 
 func registerFinanceFlowRoutes(secure fiber.Router, db *pgxpool.Pool) {
+	secure.Get("/subscription-plans", func(c *fiber.Ctx) error {
+		me := c.Locals("identity").(identity)
+		rows, err := db.Query(c.UserContext(), `SELECT id,name,price_ngn,eligible_roles,interval FROM subscription_plans WHERE $1=ANY(eligible_roles) ORDER BY price_ngn,name`, me.Role)
+		if err != nil {
+			return c.Status(503).JSON(errJSON("ERR_SUBSCRIPTION_PLANS_UNAVAILABLE"))
+		}
+		defer rows.Close()
+		items := make([]fiber.Map, 0)
+		for rows.Next() {
+			var id, name, interval string
+			var price int64
+			var roles []string
+			if err = rows.Scan(&id, &name, &price, &roles, &interval); err != nil {
+				return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
+			}
+			if id == "sovereign_60k" || id == "passenger_lifetime" {
+				if me.Role != "PASSENGER" {
+					continue
+				}
+			}
+			items = append(items, fiber.Map{"id": id, "name": name, "price_ngn": price, "eligible_roles": roles, "interval": interval})
+		}
+		if err = rows.Err(); err != nil {
+			return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
+		}
+		return c.JSON(fiber.Map{"plans": items})
+	})
+	secure.Get("/subscriptions", func(c *fiber.Ctx) error {
+		me := c.Locals("identity").(identity)
+		var id, planID, name, interval, status string
+		var price int64
+		var starts time.Time
+		var ends *time.Time
+		err := db.QueryRow(c.UserContext(), `SELECT s.id,s.plan_id,p.name,p.price_ngn,p.interval,s.status,s.starts_at,s.ends_at FROM subscriptions s JOIN subscription_plans p ON p.id=s.plan_id WHERE s.user_id=$1 AND s.status='ACTIVE' AND (s.ends_at IS NULL OR s.ends_at>now()) ORDER BY s.starts_at DESC LIMIT 1`, me.UserID).Scan(&id, &planID, &name, &price, &interval, &status, &starts, &ends)
+		if err == pgx.ErrNoRows {
+			return c.JSON(fiber.Map{"subscription": nil})
+		}
+		if err != nil {
+			return c.Status(503).JSON(errJSON("ERR_SUBSCRIPTION_UNAVAILABLE"))
+		}
+		return c.JSON(fiber.Map{"subscription": fiber.Map{"id": id, "plan_id": planID, "name": name, "price_ngn": price, "interval": interval, "status": status, "starts_at": starts, "ends_at": ends}})
+	})
 	secure.Post("/tickets/checkout", func(c *fiber.Ctx) error {
 		me := c.Locals("identity").(identity)
 		if me.Role != "PASSENGER" {
 			return c.Status(403).JSON(errJSON("ERR_ROLE_FORBIDDEN"))
 		}
 		var req struct {
-			TripID string `json:"trip_id"`
-			Seat   string `json:"seat_code"`
+			TripID        string `json:"trip_id"`
+			Seat          string `json:"seat_code"`
+			PaymentMethod string `json:"payment_method"`
 		}
 		if err := c.BodyParser(&req); err != nil {
 			return c.Status(400).JSON(errJSON("ERR_INVALID_REQUEST"))
 		}
 		req.Seat = strings.TrimSpace(req.Seat)
+		req.PaymentMethod = strings.ToUpper(strings.TrimSpace(req.PaymentMethod))
+		if req.PaymentMethod == "" {
+			req.PaymentMethod = "WALLET"
+		}
 		key := strings.TrimSpace(c.Get("Idempotency-Key"))
-		if req.TripID == "" || req.Seat == "" || len(req.Seat) > 16 || len(key) < 12 || len(key) > 120 {
+		if req.TripID == "" || req.Seat == "" || len(req.Seat) > 16 || len(key) < 12 || len(key) > 120 || (req.PaymentMethod != "WALLET" && req.PaymentMethod != "PAYSTACK") {
 			return c.Status(422).JSON(errJSON("ERR_TICKET_CHECKOUT_INVALID"))
 		}
 		tx, err := db.Begin(c.UserContext())
@@ -48,15 +97,39 @@ func registerFinanceFlowRoutes(secure fiber.Router, db *pgxpool.Pool) {
 		if tripStatus != "OPEN" || !departure.After(time.Now()) {
 			return c.Status(409).JSON(errJSON("ERR_TRIP_NOT_BOOKABLE"))
 		}
-		var existingID, existingCode, existingTrip, existingSeat string
+		var existingID, existingCode, existingTrip, existingSeat, existingStatus string
 		var existingTotal int64
-		err = tx.QueryRow(c.UserContext(), `SELECT id,manual_code,total_paid_ngn,trip_id,seat_code FROM tickets WHERE passenger_id=$1 AND checkout_key=$2`, me.UserID, key).Scan(&existingID, &existingCode, &existingTotal, &existingTrip, &existingSeat)
+		err = tx.QueryRow(c.UserContext(), `SELECT id,manual_code,total_paid_ngn,trip_id,seat_code,status FROM tickets WHERE passenger_id=$1 AND checkout_key=$2`, me.UserID, key).Scan(&existingID, &existingCode, &existingTotal, &existingTrip, &existingSeat, &existingStatus)
 		if err == nil {
 			if existingTrip != req.TripID || existingSeat != req.Seat {
 				return c.Status(409).JSON(errJSON("ERR_IDEMPOTENCY_KEY_PAYLOAD_MISMATCH"))
 			}
+			var existingURL *string
+			var existingIntent *string
+			_ = tx.QueryRow(c.UserContext(), `SELECT id,authorization_url FROM payment_intents WHERE purpose_id=$1 AND intent_type='TICKET_CHECKOUT'`, existingID).Scan(&existingIntent, &existingURL)
+			if existingStatus != "PENDING" {
+				existingURL = nil
+			}
+			if existingStatus == "PENDING" && existingURL == nil && existingIntent != nil {
+				var email string
+				if err = tx.QueryRow(c.UserContext(), `SELECT email FROM users WHERE id=$1 AND email_verified=true`, me.UserID).Scan(&email); err != nil {
+					return c.Status(403).JSON(errJSON("ERR_EMAIL_VERIFICATION_REQUIRED"))
+				}
+				var reference string
+				if err = tx.QueryRow(c.UserContext(), `SELECT provider_reference FROM payment_intents WHERE id=$1`, *existingIntent).Scan(&reference); err != nil {
+					return c.Status(503).JSON(errJSON("ERR_PAYMENT_INTENT_UNAVAILABLE"))
+				}
+				if err = tx.Commit(c.UserContext()); err != nil {
+					return c.Status(500).JSON(errJSON("ERR_CHECKOUT_COMMIT_FAILED"))
+				}
+				url, code, initErr := initializeExistingPaystackIntent(c.UserContext(), db, *existingIntent, me.UserID, email, reference, existingTotal*100, "TICKET_CHECKOUT")
+				if initErr != nil {
+					return c.Status(502).JSON(errJSON("ERR_PAYSTACK_INITIALIZE_FAILED"))
+				}
+				return c.JSON(fiber.Map{"ticket_id": existingID, "manual_code": existingCode, "total_paid_ngn": existingTotal, "status": existingStatus, "authorization_url": url, "access_code": code})
+			}
 			_ = tx.Commit(c.UserContext())
-			return c.JSON(fiber.Map{"ticket_id": existingID, "manual_code": existingCode, "total_paid_ngn": existingTotal, "status": "CONFIRMED"})
+			return c.JSON(fiber.Map{"ticket_id": existingID, "manual_code": existingCode, "total_paid_ngn": existingTotal, "status": existingStatus, "authorization_url": existingURL})
 		}
 		if err != pgx.ErrNoRows {
 			return c.Status(503).JSON(errJSON("ERR_TICKET_LOOKUP_FAILED"))
@@ -76,16 +149,26 @@ func registerFinanceFlowRoutes(secure fiber.Router, db *pgxpool.Pool) {
 			return c.Status(409).JSON(errJSON("ERR_TRIP_FULL"))
 		}
 		var balance int64
-		if err = tx.QueryRow(c.UserContext(), `SELECT balance_ngn FROM wallet_accounts WHERE user_id=$1 FOR UPDATE`, me.UserID).Scan(&balance); err != nil {
-			return c.Status(404).JSON(errJSON("ERR_WALLET_NOT_FOUND"))
-		}
 		var waived bool
-		_ = tx.QueryRow(c.UserContext(), `SELECT EXISTS(SELECT 1 FROM subscriptions s JOIN subscription_plans p ON p.id=s.plan_id WHERE s.user_id=$1 AND s.status='ACTIVE' AND (s.ends_at IS NULL OR s.ends_at>now()) AND p.id IN ('swift_pass','executive_club','passenger_lifetime'))`, me.UserID).Scan(&waived)
-		total, platform, paystack := finance.Checkout(fare*100, waived)
-		totalNaira := (total + 99) / 100
-		platformNaira := (platform + 99) / 100
-		paystackNaira := (paystack + 99) / 100
-		if balance < totalNaira {
+		_ = tx.QueryRow(c.UserContext(), `SELECT EXISTS(SELECT 1 FROM subscriptions s JOIN subscription_plans p ON p.id=s.plan_id WHERE s.user_id=$1 AND s.status='ACTIVE' AND (s.ends_at IS NULL OR s.ends_at>now()) AND p.id IN ('swift_pass','executive_club','passenger_lifetime','sovereign_60k'))`, me.UserID).Scan(&waived)
+		platformNaira := int64(20)
+		if waived {
+			platformNaira = 0
+		}
+		paystackNaira := int64(0)
+		totalNaira := fare + platformNaira
+		if req.PaymentMethod == "PAYSTACK" {
+			totalKobo, platformKobo, paystackKobo := finance.Checkout(fare*100, waived)
+			totalNaira = (totalKobo + 99) / 100
+			platformNaira = (platformKobo + 99) / 100
+			paystackNaira = (paystackKobo + 99) / 100
+		}
+		if req.PaymentMethod == "WALLET" {
+			if err = tx.QueryRow(c.UserContext(), `SELECT balance_ngn FROM wallet_accounts WHERE user_id=$1 FOR UPDATE`, me.UserID).Scan(&balance); err != nil {
+				return c.Status(404).JSON(errJSON("ERR_WALLET_NOT_FOUND"))
+			}
+		}
+		if req.PaymentMethod == "WALLET" && balance < totalNaira {
 			return c.Status(402).JSON(fiber.Map{"error": "ERR_WALLET_BALANCE_INSUFFICIENT", "required_ngn": totalNaira, "balance_ngn": balance})
 		}
 		ticketID, err := newUUID()
@@ -101,12 +184,45 @@ func registerFinanceFlowRoutes(secure fiber.Router, db *pgxpool.Pool) {
 			return c.Status(503).JSON(errJSON("ERR_TICKET_SIGNING_UNAVAILABLE"))
 		}
 		qr, _ := json.Marshal(signed)
-		if _, err = tx.Exec(c.UserContext(), `UPDATE wallet_accounts SET balance_ngn=balance_ngn-$1 WHERE user_id=$2`, totalNaira, me.UserID); err != nil {
-			return c.Status(500).JSON(errJSON("ERR_WALLET_DEBIT_FAILED"))
+		status := "CONFIRMED"
+		paymentReference := "WALLET-" + ticketID
+		if req.PaymentMethod == "PAYSTACK" {
+			status = "PENDING"
+			paymentReference = "DRT-" + strings.ReplaceAll(ticketID, "-", "")
 		}
-		_, err = tx.Exec(c.UserContext(), `INSERT INTO tickets(id,trip_id,passenger_id,seat_code,manual_code,qr_payload,base_fare_ngn,platform_fee_ngn,paystack_fee_ngn,payment_reference,status,total_paid_ngn,checkout_key) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,'CONFIRMED',$11,$12)`, ticketID, req.TripID, me.UserID, req.Seat, code, string(qr), fare, platformNaira, paystackNaira, "WALLET-"+ticketID, totalNaira, key)
+		if req.PaymentMethod == "WALLET" {
+			if _, err = tx.Exec(c.UserContext(), `UPDATE wallet_accounts SET balance_ngn=balance_ngn-$1 WHERE user_id=$2`, totalNaira, me.UserID); err != nil {
+				return c.Status(500).JSON(errJSON("ERR_WALLET_DEBIT_FAILED"))
+			}
+		}
+		_, err = tx.Exec(c.UserContext(), `INSERT INTO tickets(id,trip_id,passenger_id,seat_code,manual_code,qr_payload,base_fare_ngn,platform_fee_ngn,paystack_fee_ngn,payment_reference,status,total_paid_ngn,checkout_key) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12,$13)`, ticketID, req.TripID, me.UserID, req.Seat, code, string(qr), fare, platformNaira, paystackNaira, paymentReference, status, totalNaira, key)
 		if err != nil {
 			return c.Status(409).JSON(errJSON("ERR_TICKET_CREATE_FAILED"))
+		}
+		if req.PaymentMethod == "PAYSTACK" {
+			if os.Getenv("PAYSTACK_SECRET_KEY") == "" || !receiptSigningConfigured() {
+				return c.Status(503).JSON(errJSON("ERR_PAYMENT_SERVICE_NOT_CONFIGURED"))
+			}
+			var email string
+			if err = tx.QueryRow(c.UserContext(), `SELECT email FROM users WHERE id=$1 AND email_verified=true`, me.UserID).Scan(&email); err != nil {
+				return c.Status(403).JSON(errJSON("ERR_EMAIL_VERIFICATION_REQUIRED"))
+			}
+			intentID, uuidErr := newUUID()
+			if uuidErr != nil {
+				return c.Status(500).JSON(errJSON("ERR_PAYMENT_INTENT_CREATE_FAILED"))
+			}
+			metadata, _ := json.Marshal(map[string]any{"ticket_id": ticketID, "trip_id": req.TripID, "seat_code": req.Seat})
+			if _, err = tx.Exec(c.UserContext(), `INSERT INTO payment_intents(id,user_id,intent_type,payment_method,idempotency_key,provider_reference,amount_kobo,status,purpose_id,metadata,expires_at) VALUES($1,$2,'TICKET_CHECKOUT','PAYSTACK',$3,$4,$5,'CREATED',$6,$7::jsonb,now()+interval '30 minutes')`, intentID, me.UserID, "ticket:"+key, paymentReference, totalNaira*100, ticketID, string(metadata)); err != nil {
+				return c.Status(409).JSON(errJSON("ERR_PAYMENT_INTENT_CREATE_FAILED"))
+			}
+			if err = tx.Commit(c.UserContext()); err != nil {
+				return c.Status(500).JSON(errJSON("ERR_CHECKOUT_COMMIT_FAILED"))
+			}
+			authURL, accessCode, initErr := initializeExistingPaystackIntent(c.UserContext(), db, intentID, me.UserID, email, paymentReference, totalNaira*100, "TICKET_CHECKOUT")
+			if initErr != nil {
+				return c.Status(502).JSON(errJSON("ERR_PAYSTACK_INITIALIZE_FAILED"))
+			}
+			return c.Status(201).JSON(fiber.Map{"payment_intent_id": intentID, "ticket_id": ticketID, "reference": paymentReference, "authorization_url": authURL, "access_code": accessCode, "status": "PENDING", "total_paid_ngn": totalNaira, "base_fare_ngn": fare, "platform_fee_ngn": platformNaira, "paystack_fee_ngn": paystackNaira})
 		}
 		ledgerID, err := insertLedger(c.UserContext(), tx, me.UserID, "ticket:"+me.UserID+":"+key, -totalNaira, "TICKET_PURCHASE")
 		if err != nil {
@@ -116,9 +232,11 @@ func registerFinanceFlowRoutes(secure fiber.Router, db *pgxpool.Pool) {
 		if err = storeSignedReceipt(c.UserContext(), tx, me.UserID, "TICKET_PURCHASE", ledgerID, claims); err != nil {
 			return c.Status(503).JSON(errJSON("ERR_RECEIPT_SIGNING_UNAVAILABLE"))
 		}
+		_, _ = tx.Exec(c.UserContext(), `INSERT INTO app_notifications(user_id,category,title,body,action_url,payload) VALUES($1,'TRIP','Ticket confirmed',$2,'/tickets',jsonb_build_object('ticket_id',$3))`, me.UserID, "Your ticket is confirmed. Boarding code: "+code, ticketID)
 		if err = tx.Commit(c.UserContext()); err != nil {
 			return c.Status(500).JSON(errJSON("ERR_CHECKOUT_COMMIT_FAILED"))
 		}
+		go sendPushNotificationToUser(db, me.UserID, "Ticket confirmed", "Your ticket is ready to board.", "/tickets")
 		return c.Status(201).JSON(fiber.Map{"ticket_id": ticketID, "manual_code": code, "qr_payload": signed, "base_fare_ngn": fare, "platform_fee_ngn": platformNaira, "paystack_fee_ngn": paystackNaira, "total_paid_ngn": totalNaira, "status": "CONFIRMED"})
 	})
 	secure.Post("/tickets/:ticketID/refund", func(c *fiber.Ctx) error {
@@ -159,14 +277,17 @@ func registerFinanceFlowRoutes(secure fiber.Router, db *pgxpool.Pool) {
 			return c.Status(503).JSON(errJSON("ERR_DATABASE_UNAVAILABLE"))
 		}
 		defer tx.Rollback(c.UserContext())
-		var passengerID, tripID, ticketStatus string
+		var passengerID, tripID, ticketStatus, refundStatus, paymentStatus string
 		var fare int64
 		var departure time.Time
-		err = tx.QueryRow(c.UserContext(), `SELECT k.passenger_id,k.trip_id,k.base_fare_ngn,k.status,t.departure_at FROM tickets k JOIN trips t ON t.id=k.trip_id WHERE k.id=$1 FOR UPDATE OF k`, c.Params("ticketID")).Scan(&passengerID, &tripID, &fare, &ticketStatus, &departure)
+		err = tx.QueryRow(c.UserContext(), `SELECT k.passenger_id,k.trip_id,k.base_fare_ngn,k.status,k.refund_status,t.departure_at,COALESCE((SELECT p.status FROM payment_intents p WHERE p.purpose_id=k.id ORDER BY p.created_at DESC LIMIT 1),'SUCCEEDED') FROM tickets k JOIN trips t ON t.id=k.trip_id WHERE k.id=$1 FOR UPDATE OF k`, c.Params("ticketID")).Scan(&passengerID, &tripID, &fare, &ticketStatus, &refundStatus, &departure, &paymentStatus)
 		if err != nil || passengerID != me.UserID {
 			return c.Status(404).JSON(errJSON("ERR_TICKET_NOT_FOUND"))
 		}
-		if ticketStatus == "CANCELLED" || ticketStatus == "REFUNDED" {
+		if ticketStatus == "PENDING" || paymentStatus != "SUCCEEDED" {
+			return c.Status(409).JSON(errJSON("ERR_TICKET_PAYMENT_NOT_SETTLED"))
+		}
+		if ticketStatus == "CANCELLED" || ticketStatus == "REFUNDED" || refundStatus != "NONE" {
 			return c.Status(409).JSON(errJSON("ERR_TICKET_ALREADY_REFUNDED"))
 		}
 		if req.Claim == "CANCEL" && time.Now().After(departure) {
@@ -200,9 +321,11 @@ func registerFinanceFlowRoutes(secure fiber.Router, db *pgxpool.Pool) {
 		if err = storeSignedReceipt(c.UserContext(), tx, me.UserID, "REFUND", ledgerID, claims); err != nil {
 			return c.Status(503).JSON(errJSON("ERR_RECEIPT_SIGNING_UNAVAILABLE"))
 		}
+		_, _ = tx.Exec(c.UserContext(), `INSERT INTO app_notifications(user_id,category,title,body,action_url,payload) VALUES($1,'PAYMENT','Ticket refund completed',$2,'/transactions',jsonb_build_object('ticket_id',$3,'amount_ngn',$4))`, me.UserID, "NGN "+strconv.FormatInt(refund, 10)+" was credited to your wallet.", c.Params("ticketID"), refund)
 		if err = tx.Commit(c.UserContext()); err != nil {
 			return c.Status(500).JSON(errJSON("ERR_REFUND_COMMIT_FAILED"))
 		}
+		go sendPushNotificationToUser(db, me.UserID, "Ticket refund completed", "Your DE RIDE wallet was credited.", "/transactions")
 		return c.JSON(fiber.Map{"ticket_id": c.Params("ticketID"), "refund_amount_ngn": refund, "destination": "WALLET", "status": status})
 	})
 	secure.Post("/subscriptions/upgrade", func(c *fiber.Ctx) error {
@@ -326,7 +449,7 @@ func registerFinanceFlowRoutes(secure fiber.Router, db *pgxpool.Pool) {
 		defer tx.Rollback(c.UserContext())
 		_, _ = tx.Exec(c.UserContext(), `UPDATE subscriptions SET status='SUPERSEDED',ends_at=now() WHERE user_id=$1 AND status='ACTIVE'`, me.UserID)
 		var id string
-		if err = tx.QueryRow(c.UserContext(), `INSERT INTO subscriptions(user_id,plan_id,starts_at,ends_at,status) VALUES($1,$2,now(),now()+interval '30 days','ACTIVE') RETURNING id`, me.UserID, req.PlanID).Scan(&id); err != nil {
+		if err = tx.QueryRow(c.UserContext(), `INSERT INTO subscriptions(user_id,plan_id,starts_at,ends_at,status) VALUES($1,$2,now(),NULL,'ACTIVE') RETURNING id`, me.UserID, req.PlanID).Scan(&id); err != nil {
 			return c.Status(500).JSON(errJSON("ERR_SUBSCRIPTION_DOWNGRADE_FAILED"))
 		}
 		_, _ = tx.Exec(c.UserContext(), `INSERT INTO app_notifications(user_id,category,title,body,action_url,payload) VALUES($1,'SUBSCRIPTION','Subscription changed',$2,'/transactions',jsonb_build_object('plan_id',$3))`, me.UserID, "Your subscription was changed to the free plan.", req.PlanID)

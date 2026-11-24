@@ -61,11 +61,15 @@ func registerMediaRoutes(secure fiber.Router, db *pgxpool.Pool) {
 	secure.Get("/media/:mediaID/access", func(c *fiber.Ctx) error {
 		me := c.Locals("identity").(identity)
 		var publicID, resourceType, format, ownerID string
-		err := db.QueryRow(c.UserContext(), `SELECT public_id,resource_type,format,user_id FROM media_assets WHERE id=$1 AND upload_status='UPLOADED' AND deletion_status='ACTIVE'`, c.Params("mediaID")).Scan(&publicID, &resourceType, &format, &ownerID)
+		var sharedWithUser bool
+		err := db.QueryRow(c.UserContext(), `SELECT a.public_id,a.resource_type,a.format,a.user_id,
+			EXISTS(SELECT 1 FROM messages m JOIN trips t ON t.id=m.trip_id WHERE m.attachment_media_id=a.id AND (t.driver_id=$2 OR EXISTS(SELECT 1 FROM tickets k WHERE k.trip_id=t.id AND k.passenger_id=$2))) OR
+			EXISTS(SELECT 1 FROM support_messages m JOIN support_cases s ON s.id=m.case_id WHERE m.attachment_media_id=a.id AND s.requester_id=$2)
+			FROM media_assets a WHERE a.id=$1 AND a.upload_status='UPLOADED' AND a.deletion_status='ACTIVE' AND a.asset_category IN ('CHAT_ATTACHMENT','SUPPORT_ATTACHMENT') OR a.id=$1 AND a.upload_status='UPLOADED' AND a.deletion_status='ACTIVE' AND a.user_id=$2`, c.Params("mediaID"), me.UserID).Scan(&publicID, &resourceType, &format, &ownerID, &sharedWithUser)
 		if err != nil {
 			return c.Status(404).JSON(errJSON("ERR_MEDIA_NOT_FOUND"))
 		}
-		if ownerID != me.UserID && me.Role != "ADMIN" {
+		if ownerID != me.UserID && !sharedWithUser && me.Role != "ADMIN" {
 			return c.Status(403).JSON(errJSON("ERR_MEDIA_ACCESS_FORBIDDEN"))
 		}
 		cloud, apiKey, secret, _ := cloudinaryConfig()
@@ -121,9 +125,6 @@ func registerMediaRoutes(secure fiber.Router, db *pgxpool.Pool) {
 		}
 		signature := cloudinarySignature(params, secret)
 		initialExpiry := time.Now().Add(24 * time.Hour)
-		if policy.kyc {
-			initialExpiry = time.Time{}
-		}
 		_, err = db.Exec(c.UserContext(), `INSERT INTO media_assets(user_id,public_id,asset_category,resource_type,format,bytes,secure_url,is_kyc,expires_at,upload_status,delivery_type) VALUES($1,$2,$3,$4,$5,0,NULL,$6,$7,'PENDING','authenticated')`, identity.UserID, publicID, policy.category, policy.resource, policy.format, policy.kyc, nullableTime(initialExpiry))
 		if err != nil {
 			return c.Status(503).JSON(errJSON("ERR_MEDIA_RESERVATION_FAILED"))
@@ -278,15 +279,15 @@ func processExpiredMedia(db *pgxpool.Pool) {
 		return
 	}
 	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `WITH due AS (SELECT id FROM media_assets WHERE is_kyc=false AND expires_at<=now() AND deletion_status IN ('ACTIVE','DELETE_FAILED') AND upload_status='UPLOADED' ORDER BY expires_at FOR UPDATE SKIP LOCKED LIMIT 20) UPDATE media_assets m SET deletion_status='DELETE_PENDING' FROM due WHERE m.id=due.id RETURNING m.id,m.public_id,m.resource_type,m.delivery_type`)
+	rows, err := tx.Query(ctx, `WITH due AS (SELECT id FROM media_assets WHERE (is_kyc=false OR upload_status='PENDING') AND expires_at<=now() AND deletion_status IN ('ACTIVE','DELETE_FAILED') AND upload_status IN ('UPLOADED','PENDING') ORDER BY expires_at FOR UPDATE SKIP LOCKED LIMIT 20) UPDATE media_assets m SET deletion_status='DELETE_PENDING' FROM due WHERE m.id=due.id RETURNING m.id,m.public_id,m.resource_type,m.delivery_type,m.upload_status`)
 	if err != nil {
 		return
 	}
-	type deletion struct{ id, publicID, resourceType, deliveryType string }
+	type deletion struct{ id, publicID, resourceType, deliveryType, uploadStatus string }
 	items := make([]deletion, 0)
 	for rows.Next() {
 		var d deletion
-		if rows.Scan(&d.id, &d.publicID, &d.resourceType, &d.deliveryType) == nil {
+		if rows.Scan(&d.id, &d.publicID, &d.resourceType, &d.deliveryType, &d.uploadStatus) == nil {
 			items = append(items, d)
 		}
 	}
@@ -307,7 +308,14 @@ func processExpiredMedia(db *pgxpool.Pool) {
 			status = "DELETE_FAILED"
 			deletedAt = nil
 		}
-		_, _ = db.Exec(context.Background(), `UPDATE media_assets SET deletion_status=$1,deleted_at=$2 WHERE id=$3`, status, deletedAt, item.id)
+		if status == "DELETED" && item.uploadStatus == "PENDING" {
+			_, _ = db.Exec(context.Background(), `UPDATE media_assets SET upload_status='REJECTED',deletion_status=$1,deleted_at=$2 WHERE id=$3`, status, deletedAt, item.id)
+		} else {
+			_, _ = db.Exec(context.Background(), `UPDATE media_assets SET deletion_status=$1,deleted_at=$2 WHERE id=$3`, status, deletedAt, item.id)
+		}
+		if status == "DELETED" {
+			_, _ = db.Exec(context.Background(), `UPDATE users SET profile_photo_media_id=NULL,profile_photo_url=NULL,cloudinary_public_id=NULL WHERE profile_photo_media_id=$1`, item.id)
+		}
 	}
 }
 

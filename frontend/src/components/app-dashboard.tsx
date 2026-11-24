@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { ArrowDownLeft, ArrowUpRight, Bell, BusFront, CircleHelp, Clock3, Compass, LogOut, MapPin, Package, ShieldCheck, Sparkles, Wallet } from 'lucide-react';
+import { ArrowDownLeft, ArrowUpRight, Bell, BusFront, CircleHelp, Clock3, Compass, LogOut, MapPin, Package, ShieldCheck, Sparkles, Wallet, Smartphone, MessageCircle } from 'lucide-react';
 import { AccountProfile, apiRequest, signOut } from '@/lib/api-client';
 import { RiderModeSwitcher } from '@/components/rider-mode-switcher';
 
@@ -14,18 +14,24 @@ type RoleConfig = { title: string; subtitle: string; icon: typeof BusFront; link
 const configs: Record<string, RoleConfig> = {
   PASSENGER: { title: 'Passenger dashboard', subtitle: 'Your journeys, account and travel tools in one place.', icon: Compass, links: [
     { label: 'Explore registered parks', href: '/passenger/explore', icon: MapPin, note: 'Browse park locations and launch hubs' },
+    { label: 'Book bus tickets', href: '/tickets', icon: BusFront, note: 'Find trips, choose a seat and check out' },
+    { label: 'Buy mobile data', href: '/data', icon: Smartphone, note: 'Browse MTN, Airtel, Glo and 9mobile bundles' },
     { label: 'Trip support', href: '/support', icon: CircleHelp, note: 'Get help with a booking or account' },
   ] },
   DRIVER: { title: 'Driver dashboard', subtitle: 'Keep your profile ready for assigned trips and service updates.', icon: BusFront, links: [
     { label: 'Driver workspace', href: '/driver/dashboard', icon: BusFront, note: 'Trip and vehicle tools' },
+    { label: 'Create a bus trip', href: '/driver/trips', icon: BusFront, note: 'Publish a trip using an approved bus' },
+    { label: 'Buy mobile data', href: '/data', icon: Smartphone, note: 'Purchase a bundle with your wallet' },
     { label: 'Safety and support', href: '/support', icon: ShieldCheck, note: 'Contact the DE RIDE team' },
   ] },
   BIKER: { title: 'Biker dashboard', subtitle: 'Your rider profile, account balance and service access.', icon: Compass, links: [
     { label: 'Biker radar', href: '/biker/radar', icon: MapPin, note: 'Open your rider workspace' },
+    { label: 'Buy mobile data', href: '/data', icon: Smartphone, note: 'Purchase a bundle with your wallet' },
     { label: 'Switch rider mode', href: '/biker/radar', icon: ArrowUpRight, note: 'Available after both rider profiles are approved' },
   ] },
   DISPATCH_RIDER: { title: 'Dispatch rider dashboard', subtitle: 'Your delivery profile and account at a glance.', icon: Package, links: [
     { label: 'Deliveries', href: '/dispatch-rider/deliveries', icon: Package, note: 'Open the dispatch workspace' },
+    { label: 'Buy mobile data', href: '/data', icon: Smartphone, note: 'Purchase a bundle with your wallet' },
     { label: 'Rider support', href: '/support', icon: CircleHelp, note: 'Contact the DE RIDE team' },
   ] },
   DISPATCHER: { title: 'Dispatcher dashboard', subtitle: 'Terminal operations and account information.', icon: BusFront, links: [
@@ -38,6 +44,9 @@ const configs: Record<string, RoleConfig> = {
   ] },
   ADMIN: { title: 'Admin dashboard', subtitle: 'Account and command tools for DE RIDE administration.', icon: ShieldCheck, links: [
     { label: 'Command map', href: '/admin/command-map', icon: MapPin, note: 'Open administration tools' },
+    { label: 'Support queue', href: '/admin/support', icon: CircleHelp, note: 'Reply to customer cases' },
+    { label: 'Disputes', href: '/admin/disputes', icon: ShieldCheck, note: 'Review and resolve customer disputes' },
+    { label: 'Safety escalations', href: '/admin/escalations', icon: MessageCircle, note: 'Join urgent trip mediation' },
   ] },
 };
 const roleDestinations: Record<string, string> = { PASSENGER:'/passenger/explore', DRIVER:'/driver/dashboard', DISPATCHER:'/park-operator/terminal', PARK_OPERATOR:'/park-operator/terminal', BIKER:'/biker/radar', DISPATCH_RIDER:'/dispatch-rider/deliveries', ADMIN:'/admin/command-map' };
@@ -102,6 +111,9 @@ export function AppDashboard({ requiredRole }: { requiredRole?: string }) {
       <Link className="account-nav-active" href={path || '/'}><Icon size={18}/>{config.title}</Link>
       <Link className="account-nav-link" href="/"><Compass size={18}/>Back to explore</Link>
       <Link className="account-nav-link" href="/wallet"><Wallet size={18}/>Wallet</Link>
+      <Link className="account-nav-link" href="/subscriptions"><Sparkles size={18}/>Subscriptions</Link>
+      <Link className="account-nav-link" href="/data"><Smartphone size={18}/>Buy data</Link>
+      <Link className="account-nav-link" href="/messages"><MessageCircle size={18}/>Trip chat</Link>
       <Link className="account-nav-link" href="/transactions"><ArrowDownLeft size={18}/>Transactions</Link>
       <Link className="account-nav-link" href="/notifications"><Bell size={18}/>Notifications</Link>
       <div className="account-rail-bottom"><ShieldCheck size={17}/><span>Secure account<br/><small>Session protected</small></span></div>

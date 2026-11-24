@@ -1,6 +1,6 @@
 # DE RIDE ecosystem
 
-DE RIDE is a multi-role Nigerian mobility platform monorepo. It contains a Next.js PWA, Go/Fiber API, FastAPI Amebo AI service, and PostgreSQL/PostGIS migrations. Account/session flows, Cloudinary media lifecycle, Paystack wallet funding, wallet ticket checkout/refunds, wallet subscription changes, signed receipts, notification inbox/push, KYC review, and customer support case creation are implemented. Provider-backed ticket checkout/refunds, recurring subscription billing, VTU vending, and other outstanding capabilities are tracked in `backend/API.md`.
+DE RIDE is a multi-role Nigerian mobility platform monorepo. It contains a Next.js PWA, Go/Fiber API, FastAPI Amebo AI service, and PostgreSQL/PostGIS migrations. Account/session flows, Cloudinary media lifecycle, Paystack wallet funding and ticket checkout, wallet ticket refunds, wallet subscription changes, wallet VTU purchases, signed receipts, notification inbox/push, KYC review, trip operations, trip messaging, and customer/admin support workflows are implemented. Remaining provider and operational limits are tracked in `backend/API.md`.
 
 ## Local development
 

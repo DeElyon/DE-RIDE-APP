@@ -15,7 +15,7 @@ func registerAccountRoutes(secure fiber.Router, db *pgxpool.Pool) {
 	secure.Get("/transactions", func(c *fiber.Ctx) error {
 		me := c.Locals("identity").(identity)
 		category := strings.ToUpper(strings.TrimSpace(c.Query("category")))
-		rows, err := db.Query(c.UserContext(), `SELECT l.id,l.entry_type,l.amount_ngn,l.created_at,r.id,r.signed_payload FROM ledger_entries l LEFT JOIN signed_receipts r ON r.ledger_entry_id=l.id WHERE l.user_id=$1 AND ($2='' OR l.entry_type=$2) ORDER BY l.created_at DESC LIMIT 100`, me.UserID, category)
+		rows, err := db.Query(c.UserContext(), `SELECT l.id,l.entry_type,l.amount_ngn,l.created_at,r.id,r.signed_payload,r.payment_intent_id FROM ledger_entries l LEFT JOIN signed_receipts r ON r.ledger_entry_id=l.id WHERE l.user_id=$1 AND ($2='' OR l.entry_type=$2) ORDER BY l.created_at DESC LIMIT 100`, me.UserID, category)
 		if err != nil {
 			return c.Status(503).JSON(errJSON("ERR_TRANSACTIONS_UNAVAILABLE"))
 		}
@@ -26,10 +26,11 @@ func registerAccountRoutes(secure fiber.Router, db *pgxpool.Pool) {
 			var amount int64
 			var createdAt time.Time
 			var receiptID, signedPayload *string
-			if err = rows.Scan(&id, &entryType, &amount, &createdAt, &receiptID, &signedPayload); err != nil {
+			var paymentIntentID *string
+			if err = rows.Scan(&id, &entryType, &amount, &createdAt, &receiptID, &signedPayload, &paymentIntentID); err != nil {
 				return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
 			}
-			items = append(items, fiber.Map{"id": id, "category": entryType, "amount_ngn": amount, "created_at": createdAt, "receipt_id": receiptID, "signed_receipt": signedPayload})
+			items = append(items, fiber.Map{"id": id, "category": entryType, "amount_ngn": amount, "created_at": createdAt, "receipt_id": receiptID, "signed_receipt": signedPayload, "payment_intent_id": paymentIntentID})
 		}
 		if err = rows.Err(); err != nil {
 			return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
@@ -152,5 +153,46 @@ func sendPushNotificationToUser(db *pgxpool.Pool, userID, title, body, actionURL
 		} else if status >= 200 && status < 300 {
 			_, _ = db.Exec(context.Background(), `UPDATE push_subscriptions SET last_used_at=now() WHERE id=$1`, s.id)
 		}
+	}
+}
+
+func notifyAdminsOfEscalation(db *pgxpool.Pool, issue string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := db.Query(ctx, `SELECT id FROM users WHERE active_role='ADMIN'`)
+	if err != nil {
+		return
+	}
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	for _, id := range ids {
+		go sendPushNotificationToUser(db, id, "Urgent trip report", issue, "/admin/escalations")
+	}
+}
+
+func notifyAdminsOfEvent(db *pgxpool.Pool, title, body, actionURL string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := db.Query(ctx, `SELECT id FROM users WHERE active_role='ADMIN'`)
+	if err != nil {
+		return
+	}
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	for _, id := range ids {
+		_, _ = db.Exec(ctx, `INSERT INTO app_notifications(user_id,category,title,body,action_url) VALUES($1,'SUPPORT',$2,$3,$4)`, id, title, body, actionURL)
+		go sendPushNotificationToUser(db, id, title, body, actionURL)
 	}
 }

@@ -8,6 +8,28 @@ import (
 )
 
 func registerKYCRoutes(secure fiber.Router, db *pgxpool.Pool) {
+	secure.Get("/my-vehicle-registrations", func(c *fiber.Ctx) error {
+		me := c.Locals("identity").(identity)
+		rows, err := db.Query(c.UserContext(), `SELECT id,vehicle_type,plate_number,seat_capacity,make,model,verification_status,created_at FROM vehicle_registrations WHERE owner_id=$1 ORDER BY created_at DESC LIMIT 100`, me.UserID)
+		if err != nil {
+			return c.Status(503).JSON(errJSON("ERR_VEHICLE_REGISTRATIONS_UNAVAILABLE"))
+		}
+		defer rows.Close()
+		items := make([]fiber.Map, 0)
+		for rows.Next() {
+			var id, kind, plate, make, model, status string
+			var seats int
+			var created time.Time
+			if err = rows.Scan(&id, &kind, &plate, &seats, &make, &model, &status, &created); err != nil {
+				return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
+			}
+			items = append(items, fiber.Map{"id": id, "vehicle_type": kind, "plate_number": plate, "seat_capacity": seats, "make": make, "model": model, "verification_status": status, "created_at": created})
+		}
+		if err = rows.Err(); err != nil {
+			return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
+		}
+		return c.JSON(fiber.Map{"registrations": items})
+	})
 	secure.Post("/vehicle-registrations", func(c *fiber.Ctx) error {
 		me := c.Locals("identity").(identity)
 		var req struct {

@@ -53,7 +53,7 @@ func main() {
 	if origins == "" {
 		origins = "http://localhost:3000"
 	}
-	app.Use(cors.New(cors.Config{AllowOrigins: origins, AllowMethods: "GET,POST,PATCH,PUT,DELETE,OPTIONS", AllowHeaders: "Origin,Content-Type,Accept,Authorization", MaxAge: 600}))
+	app.Use(cors.New(cors.Config{AllowOrigins: origins, AllowMethods: "GET,POST,PATCH,PUT,DELETE,OPTIONS", AllowHeaders: "Origin,Content-Type,Accept,Authorization,Idempotency-Key", MaxAge: 600}))
 	app.Use(func(c *fiber.Ctx) error {
 		c.Set("X-Content-Type-Options", "nosniff")
 		c.Set("Referrer-Policy", "same-origin")
@@ -76,6 +76,20 @@ func main() {
 		defer ticker.Stop()
 		for range ticker.C {
 			processPendingPaystackEvents(db)
+		}
+	}()
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			processPendingVTUOrders(db)
+		}
+	}()
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			processExpiredTicketCheckouts(db)
 		}
 	}()
 	v1.Get("/health", func(c *fiber.Ctx) error {
@@ -129,6 +143,8 @@ func main() {
 	registerAccountRoutes(secure, db)
 	registerKYCRoutes(secure, db)
 	registerSupportRoutes(secure, db)
+	registerVTURoutes(secure, db)
+	registerTripRoutes(secure, db)
 	secure.Get("/me", func(c *fiber.Ctx) error {
 		me := c.Locals("identity").(identity)
 		_, _ = db.Exec(c.UserContext(), `INSERT INTO wallet_accounts(user_id,balance_ngn) VALUES($1,0) ON CONFLICT(user_id) DO NOTHING`, me.UserID)
@@ -195,11 +211,12 @@ func main() {
 				return
 			}
 			var event struct {
-				Type        string `json:"event"`
-				TripID      string `json:"trip_id"`
-				Content     string `json:"content"`
-				Category    string `json:"category"`
-				Description string `json:"description"`
+				Type         string `json:"event"`
+				TripID       string `json:"trip_id"`
+				Content      string `json:"content"`
+				AttachmentID string `json:"attachment_media_id"`
+				Category     string `json:"category"`
+				Description  string `json:"description"`
 			}
 			if json.Unmarshal(raw, &event) != nil || event.TripID == "" {
 				_ = client.Send(fiber.Map{"event": "error", "code": "ERR_INVALID_EVENT"})
@@ -209,7 +226,7 @@ func main() {
 			switch event.Type {
 			case "room:join":
 				var allowed bool
-				err = db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM trips t WHERE t.id=$1 AND (t.driver_id=$2 OR EXISTS(SELECT 1 FROM tickets k WHERE k.trip_id=t.id AND k.passenger_id=$2)))`, event.TripID, me.UserID).Scan(&allowed)
+				err = db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM trips t WHERE t.id=$1 AND (t.driver_id=$2 OR EXISTS(SELECT 1 FROM tickets k WHERE k.trip_id=t.id AND k.passenger_id=$2) OR ($3='ADMIN' AND EXISTS(SELECT 1 FROM escalations e WHERE e.trip_id=t.id AND e.status IN ('OPEN','IN_PROGRESS')))))`, event.TripID, me.UserID, me.Role).Scan(&allowed)
 				if err == nil && allowed {
 					hub.Join("trip:"+event.TripID, client)
 					err = client.Send(fiber.Map{"event": "room:joined", "trip_id": event.TripID})
@@ -217,14 +234,14 @@ func main() {
 					err = client.Send(fiber.Map{"event": "error", "code": "ERR_TRIP_ACCESS_DENIED"})
 				}
 			case "chat:send_message":
-				if len(event.Content) == 0 || len(event.Content) > 2000 {
+				if (len(event.Content) == 0 && event.AttachmentID == "") || len(event.Content) > 2000 {
 					err = client.Send(fiber.Map{"event": "error", "code": "ERR_INVALID_MESSAGE"})
 					break
 				}
 				var messageID string
-				err = db.QueryRow(ctx, `INSERT INTO messages(trip_id,sender_id,body) SELECT t.id,$2,$3 FROM trips t WHERE t.id=$1 AND (t.driver_id=$2 OR EXISTS(SELECT 1 FROM tickets k WHERE k.trip_id=t.id AND k.passenger_id=$2)) AND NOT(t.status IN ('ARRIVED','CANCELLED') AND t.arrived_at IS NOT NULL AND now()>t.arrived_at+interval '6 minutes') RETURNING id`, event.TripID, me.UserID, event.Content).Scan(&messageID)
+				err = db.QueryRow(ctx, `INSERT INTO messages(trip_id,sender_id,body,attachment_media_id) SELECT t.id,$2,$3,NULLIF($4,'')::uuid FROM trips t WHERE t.id=$1 AND (t.driver_id=$2 OR EXISTS(SELECT 1 FROM tickets k WHERE k.trip_id=t.id AND k.passenger_id=$2) OR ($5='ADMIN' AND EXISTS(SELECT 1 FROM escalations e WHERE e.trip_id=t.id AND e.status IN ('OPEN','IN_PROGRESS')))) AND ($4='' OR EXISTS(SELECT 1 FROM media_assets a WHERE a.id=NULLIF($4,'')::uuid AND a.user_id=$2 AND a.asset_category='CHAT_ATTACHMENT' AND a.upload_status='UPLOADED' AND a.deletion_status='ACTIVE')) AND NOT(t.status IN ('ARRIVED','CANCELLED') AND t.arrived_at IS NOT NULL AND now()>t.arrived_at+interval '6 minutes') RETURNING id`, event.TripID, me.UserID, event.Content, event.AttachmentID, me.Role).Scan(&messageID)
 				if err == nil {
-					hub.Broadcast("trip:"+event.TripID, fiber.Map{"event": "chat:message", "id": messageID, "trip_id": event.TripID, "sender_id": me.UserID, "content": event.Content, "created_at": time.Now().UTC()})
+					hub.Broadcast("trip:"+event.TripID, fiber.Map{"event": "chat:message", "id": messageID, "trip_id": event.TripID, "sender_id": me.UserID, "content": event.Content, "attachment_media_id": event.AttachmentID, "created_at": time.Now().UTC()})
 				} else {
 					err = client.Send(fiber.Map{"event": "error", "code": "ERR_CHAT_UNAVAILABLE"})
 				}
@@ -240,6 +257,8 @@ func main() {
 					alert := fiber.Map{"event": "escalation:urgent_alert", "escalation_id": escalationID, "trip_id": event.TripID, "reporter_id": me.UserID, "issue": issue}
 					hub.Broadcast("admin:sos", alert)
 					hub.Broadcast("trip:"+event.TripID, alert)
+					_, _ = db.Exec(ctx, `INSERT INTO app_notifications(user_id,category,title,body,action_url,payload) SELECT id,'SAFETY','Urgent trip report',$1,'/admin/escalations',jsonb_build_object('escalation_id',$2,'trip_id',$3) FROM users WHERE active_role='ADMIN'`, issue, escalationID, event.TripID)
+					go notifyAdminsOfEscalation(db, issue)
 				} else {
 					err = client.Send(fiber.Map{"event": "error", "code": "ERR_ESCALATION_UNAVAILABLE"})
 				}
@@ -424,7 +443,8 @@ func purgeExpiredTripMessages(db *pgxpool.Pool) {
 	defer ticker.Stop()
 	for range ticker.C {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, _ = db.Exec(ctx, `DELETE FROM messages m USING trips t WHERE m.trip_id=t.id AND t.status IN ('ARRIVED','CANCELLED') AND t.arrived_at IS NOT NULL AND now()>t.arrived_at+interval '6 minutes' AND NOT EXISTS(SELECT 1 FROM escalations e WHERE e.trip_id=t.id)`)
+		_, _ = db.Exec(ctx, `UPDATE escalations e SET preserved_chat_log=COALESCE((SELECT jsonb_agg(jsonb_build_object('id',m.id,'sender_id',m.sender_id,'content',m.body,'attachment_media_id',m.attachment_media_id,'created_at',m.created_at) ORDER BY m.created_at) FROM messages m WHERE m.trip_id=e.trip_id),'[]'::jsonb),frozen_at=now() WHERE e.status IN ('OPEN','IN_PROGRESS') AND e.frozen_at IS NULL AND EXISTS(SELECT 1 FROM trips t WHERE t.id=e.trip_id AND t.status IN ('ARRIVED','CANCELLED') AND t.arrived_at IS NOT NULL AND now()>t.arrived_at+interval '6 minutes')`)
+		_, _ = db.Exec(ctx, `DELETE FROM messages m USING trips t WHERE m.trip_id=t.id AND t.status IN ('ARRIVED','CANCELLED') AND t.arrived_at IS NOT NULL AND now()>t.arrived_at+interval '6 minutes' AND NOT EXISTS(SELECT 1 FROM escalations e WHERE e.trip_id=t.id AND e.status IN ('OPEN','IN_PROGRESS'))`)
 		cancel()
 	}
 }
