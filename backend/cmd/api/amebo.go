@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os"
 	"strings"
 	"time"
 
@@ -35,12 +36,21 @@ func registerAmeboRoutes(secure fiber.Router, db *pgxpool.Pool) {
 		in.PackID = strings.ToUpper(strings.TrimSpace(in.PackID))
 		in.PaymentMethod = strings.ToUpper(strings.TrimSpace(in.PaymentMethod))
 		p, ok := ameboPacks[in.PackID]
-		if !ok || (in.PaymentMethod != "" && in.PaymentMethod != "WALLET") {
+		if in.PaymentMethod == "" { in.PaymentMethod = "WALLET" }
+		if !ok || (in.PaymentMethod != "WALLET" && in.PaymentMethod != "PAYSTACK") {
 			return c.Status(422).JSON(errJSON("ERR_AMEBO_PACK_INVALID"))
 		}
 		key := strings.TrimSpace(c.Get("Idempotency-Key"))
 		if len(key) < 12 || len(key) > 120 {
 			return c.Status(400).JSON(errJSON("ERR_IDEMPOTENCY_KEY_REQUIRED"))
+		}
+		if in.PaymentMethod == "PAYSTACK" {
+			if os.Getenv("PAYSTACK_SECRET_KEY") == "" || !receiptSigningConfigured() { return c.Status(503).JSON(errJSON("ERR_PAYMENT_SERVICE_NOT_CONFIGURED")) }
+			var email string
+			if err := db.QueryRow(c.UserContext(), `SELECT email FROM users WHERE id=$1 AND email_verified=true`, me.UserID).Scan(&email); err != nil { return c.Status(403).JSON(errJSON("ERR_EMAIL_VERIFICATION_REQUIRED")) }
+			id,reference,authURL,accessCode,err := createPurposePaystackIntent(c.UserContext(),db,me.UserID,email,"AMEBO_TOKENS",key,p.Price*100,map[string]any{"pack_id":in.PackID})
+			if err != nil { return c.Status(409).JSON(errJSON("ERR_PAYSTACK_INITIALIZE_FAILED")) }
+			return c.Status(201).JSON(fiber.Map{"payment_intent_id":id,"reference":reference,"authorization_url":authURL,"access_code":accessCode,"status":"PENDING","pack_id":in.PackID,"tokens":p.Tokens,"price_ngn":p.Price})
 		}
 		tx, err := db.Begin(c.UserContext())
 		if err != nil {

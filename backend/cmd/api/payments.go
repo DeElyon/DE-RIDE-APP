@@ -81,7 +81,7 @@ func registerPaymentRoutes(v1, secure fiber.Router, db *pgxpool.Pool) {
 		}
 		var intentID, intentStatus, intentType string
 		var amount int64
-		if err := db.QueryRow(c.UserContext(), `SELECT id,status,amount_kobo,intent_type FROM payment_intents WHERE user_id=$1 AND provider_reference=$2 AND intent_type IN ('WALLET_FUNDING','TICKET_CHECKOUT')`, me.UserID, reference).Scan(&intentID, &intentStatus, &amount, &intentType); err != nil {
+		if err := db.QueryRow(c.UserContext(), `SELECT id,status,amount_kobo,intent_type FROM payment_intents WHERE user_id=$1 AND provider_reference=$2`, me.UserID, reference).Scan(&intentID, &intentStatus, &amount, &intentType); err != nil {
 			return c.Status(404).JSON(errJSON("ERR_PAYMENT_NOT_FOUND"))
 		}
 		if intentStatus != "SUCCEEDED" {
@@ -89,7 +89,13 @@ func registerPaymentRoutes(v1, secure fiber.Router, db *pgxpool.Pool) {
 			if intentType == "WALLET_FUNDING" {
 				settleErr = verifyAndSettleWalletFunding(c.UserContext(), db, reference)
 			} else {
-				settleErr = verifyAndSettleTicketCheckout(c.UserContext(), db, reference)
+				switch intentType {
+				case "TICKET_CHECKOUT": settleErr = verifyAndSettleTicketCheckout(c.UserContext(), db, reference)
+				case "SUBSCRIPTION": settleErr = settlePaystackSubscription(c.UserContext(), db, reference)
+				case "AMEBO_TOKENS": settleErr = settlePaystackAmeboPack(c.UserContext(), db, reference)
+				case "VTU_DATA": settleErr = settlePaystackVTU(c.UserContext(), db, reference)
+				default: settleErr = fmt.Errorf("unsupported Paystack intent type")
+				}
 			}
 			if settleErr != nil {
 				return c.Status(409).JSON(errJSON("ERR_PAYMENT_NOT_SETTLED"))
@@ -101,6 +107,7 @@ func registerPaymentRoutes(v1, secure fiber.Router, db *pgxpool.Pool) {
 			_ = db.QueryRow(c.UserContext(), `SELECT purpose_id::text FROM payment_intents WHERE id=$1`, intentID).Scan(&ticketID)
 			result["ticket_id"] = ticketID
 		}
+		result["intent_type"] = intentType
 		return c.JSON(result)
 	})
 	v1.Post("/webhooks/paystack", func(c *fiber.Ctx) error {
@@ -153,7 +160,12 @@ func processPaystackWebhookEvent(db *pgxpool.Pool, eventID string) {
 		} else if intentType == "TICKET_CHECKOUT" {
 			err = verifyAndSettleTicketCheckout(ctx, db, reference)
 		} else {
-			err = fmt.Errorf("unsupported Paystack intent type")
+			switch intentType {
+			case "SUBSCRIPTION": err = settlePaystackSubscription(ctx, db, reference)
+			case "AMEBO_TOKENS": err = settlePaystackAmeboPack(ctx, db, reference)
+			case "VTU_DATA": err = settlePaystackVTU(ctx, db, reference)
+			default: err = fmt.Errorf("unsupported Paystack intent type")
+			}
 		}
 		if err != nil {
 			_, _ = db.Exec(ctx, `UPDATE paystack_webhook_events SET processing_at=NULL,processing_error=$1 WHERE event_id=$2`, err.Error(), eventID)
@@ -367,8 +379,12 @@ func initializeExistingPaystackIntent(ctx context.Context, db *pgxpool.Pool, int
 		frontend = "http://localhost:3000"
 	}
 	callback := frontend + "/wallet?payment=return"
-	if purpose == "TICKET_CHECKOUT" {
-		callback = frontend + "/tickets?payment=return"
+	switch purpose {
+	case "TICKET_CHECKOUT": callback = frontend + "/tickets?payment=return"
+	case "SUBSCRIPTION": callback = frontend + "/subscriptions?payment=return"
+	case "AMEBO_TOKENS": callback = frontend + "/amebo?payment=return"
+	case "VTU_DATA": callback = frontend + "/data?payment=return"
+	case "RIDER_ORDER": callback = frontend + "/mobility?payment=return"
 	}
 	body, _ := json.Marshal(map[string]any{"email": email, "amount": amountKobo, "reference": reference, "currency": "NGN", "callback_url": callback, "metadata": map[string]any{"intent_id": intentID, "purpose": purpose, "user_id": userID}})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.paystack.co/transaction/initialize", strings.NewReader(string(body)))
@@ -401,6 +417,114 @@ func initializeExistingPaystackIntent(ctx context.Context, db *pgxpool.Pool, int
 	}
 	_, err = db.Exec(ctx, `UPDATE payment_intents SET status='PENDING',authorization_url=$1,access_code=$2,expires_at=now()+interval '30 minutes',updated_at=now() WHERE id=$3 AND status IN ('CREATED','PENDING')`, provider.Data.AuthorizationURL, provider.Data.AccessCode, intentID)
 	return provider.Data.AuthorizationURL, provider.Data.AccessCode, err
+}
+
+func createPurposePaystackIntent(ctx context.Context, db *pgxpool.Pool, userID, email, intentType, key string, amountKobo int64, metadata map[string]any) (string, string, string, string, error) {
+	if os.Getenv("PAYSTACK_SECRET_KEY") == "" || amountKobo < 100 || strings.TrimSpace(email) == "" {
+		return "", "", "", "", fmt.Errorf("Paystack is not configured or intent is invalid")
+	}
+	key = strings.TrimSpace(key)
+	if len(key) < 12 || len(key) > 120 { return "", "", "", "", fmt.Errorf("invalid idempotency key") }
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil { return "", "", "", "", err }
+	reference := "DR" + intentType[:min(3, len(intentType))] + "-" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	tx, err := db.Begin(ctx)
+	if err != nil { return "", "", "", "", err }
+	defer tx.Rollback(ctx)
+	var id, status string
+	var savedURL, savedCode *string
+	err = tx.QueryRow(ctx, `INSERT INTO payment_intents(user_id,intent_type,payment_method,idempotency_key,provider_reference,amount_kobo,status,metadata) VALUES($1,$2,'PAYSTACK',$3,$4,$5,'CREATED',$6::jsonb) ON CONFLICT(user_id,idempotency_key) DO NOTHING RETURNING id,status,authorization_url,access_code`, userID, intentType, intentType+":"+key, reference, amountKobo, string(metadataJSON)).Scan(&id,&status,&savedURL,&savedCode)
+	if err == pgx.ErrNoRows {
+		var existingType string
+		var existingAmount int64
+		var existingMetadata []byte
+		if err = tx.QueryRow(ctx, `SELECT id,intent_type,amount_kobo,metadata,status,authorization_url,access_code,provider_reference FROM payment_intents WHERE user_id=$1 AND idempotency_key=$2 FOR UPDATE`, userID, intentType+":"+key).Scan(&id,&existingType,&existingAmount,&existingMetadata,&status,&savedURL,&savedCode,&reference); err != nil { return "", "", "", "", err }
+		if existingType != intentType || existingAmount != amountKobo || !jsonEqual(existingMetadata, metadataJSON) { return "", "", "", "", fmt.Errorf("idempotency payload mismatch") }
+	}
+	if err != nil { return "", "", "", "", err }
+	if err = tx.Commit(ctx); err != nil { return "", "", "", "", err }
+	if status == "SUCCEEDED" { return id, reference, stringValue(savedURL), stringValue(savedCode), nil }
+	authURL, accessCode, err := initializeExistingPaystackIntent(ctx, db, id, userID, email, reference, amountKobo, intentType)
+	return id, reference, authURL, accessCode, err
+}
+
+func jsonEqual(left, right []byte) bool {
+	var a, b any
+	return json.Unmarshal(left,&a)==nil && json.Unmarshal(right,&b)==nil && fmt.Sprint(a)==fmt.Sprint(b)
+}
+
+func verifyPaystackIntentAmount(ctx context.Context, reference string, expected int64) error {
+	if os.Getenv("PAYSTACK_SECRET_KEY") == "" { return fmt.Errorf("payment provider is not configured") }
+	req, err := http.NewRequestWithContext(ctx,http.MethodGet,"https://api.paystack.co/transaction/verify/"+url.PathEscape(reference),nil)
+	if err != nil { return err }
+	req.Header.Set("Authorization","Bearer "+os.Getenv("PAYSTACK_SECRET_KEY"))
+	resp, err := (&http.Client{Timeout:15*time.Second}).Do(req)
+	if err != nil { return err }
+	defer resp.Body.Close()
+	var verified paystackVerifyResponse
+	if err=json.NewDecoder(io.LimitReader(resp.Body,1<<20)).Decode(&verified);err!=nil{return err}
+	if resp.StatusCode<200||resp.StatusCode>=300||!verified.Status||verified.Data.Status!="success"||verified.Data.Reference!=reference||verified.Data.Currency!="NGN"||verified.Data.Amount!=expected{return fmt.Errorf("verified payment does not match intent")}
+	return nil
+}
+
+func settlePaystackSubscription(ctx context.Context, db *pgxpool.Pool, reference string) error {
+	var amount int64
+	if err:=db.QueryRow(ctx,`SELECT amount_kobo FROM payment_intents WHERE provider_reference=$1 AND intent_type='SUBSCRIPTION'`,reference).Scan(&amount);err!=nil{return err}
+	if err:=verifyPaystackIntentAmount(ctx,reference,amount);err!=nil{return err}
+	tx,err:=db.Begin(ctx);if err!=nil{return err};defer tx.Rollback(ctx)
+	var id,userID,status string;var metadata []byte
+	if err=tx.QueryRow(ctx,`SELECT id,user_id,status,metadata FROM payment_intents WHERE provider_reference=$1 AND intent_type='SUBSCRIPTION' FOR UPDATE`,reference).Scan(&id,&userID,&status,&metadata);err!=nil{return err}
+	if status=="SUCCEEDED"{return tx.Commit(ctx)};if status!="CREATED"&&status!="PENDING"{return fmt.Errorf("payment intent is not settleable")}
+	var payload struct{PlanID string `json:"plan_id"`};if json.Unmarshal(metadata,&payload)!=nil||payload.PlanID==""{return fmt.Errorf("subscription metadata invalid")}
+	var price int64;var interval string
+	if err=tx.QueryRow(ctx,`SELECT price_ngn,interval FROM subscription_plans WHERE id=$1`,payload.PlanID).Scan(&price,&interval);err!=nil{return err};if price*100!=amount{return fmt.Errorf("subscription price mismatch")}
+	if _,err=tx.Exec(ctx,`UPDATE subscriptions SET status='SUPERSEDED',ends_at=now() WHERE user_id=$1 AND status='ACTIVE'`,userID);err!=nil{return err}
+	var ends any;if interval!="one_time"{ends=time.Now().Add(30*24*time.Hour)}
+	var subscriptionID string;if err=tx.QueryRow(ctx,`INSERT INTO subscriptions(user_id,plan_id,starts_at,ends_at,status) VALUES($1,$2,now(),$3,'ACTIVE') RETURNING id`,userID,payload.PlanID,ends).Scan(&subscriptionID);err!=nil{return err}
+	ledgerID,err:=insertLedger(ctx,tx,userID,"subscription-paystack:"+id,-price,"SUBSCRIPTION");if err!=nil{return err}
+	if err=storeSignedReceipt(ctx,tx,userID,"SUBSCRIPTION",ledgerID,map[string]any{"subscription_id":subscriptionID,"plan_id":payload.PlanID,"amount_ngn":price,"reference":reference,"type":"SUBSCRIPTION","issued_at":time.Now().UTC().Format(time.RFC3339)});err!=nil{return err}
+	if _,err=tx.Exec(ctx,`UPDATE payment_intents SET status='SUCCEEDED',settled_at=now(),updated_at=now() WHERE id=$1`,id);err!=nil{return err}
+	if _,err=tx.Exec(ctx,`INSERT INTO app_notifications(user_id,category,title,body,action_url,payload) VALUES($1,'SUBSCRIPTION','Subscription active','Your subscription payment was confirmed.','/transactions',jsonb_build_object('plan_id',$2))`,userID,payload.PlanID);err!=nil{return err}
+	if err=tx.Commit(ctx);err!=nil{return err};go sendPushNotificationToUser(db,userID,"Subscription active","Your subscription payment was confirmed.","/transactions");return nil
+}
+
+func settlePaystackAmeboPack(ctx context.Context, db *pgxpool.Pool, reference string) error {
+	var amount int64;if err:=db.QueryRow(ctx,`SELECT amount_kobo FROM payment_intents WHERE provider_reference=$1 AND intent_type='AMEBO_TOKENS'`,reference).Scan(&amount);err!=nil{return err}
+	if err:=verifyPaystackIntentAmount(ctx,reference,amount);err!=nil{return err}
+	tx,err:=db.Begin(ctx);if err!=nil{return err};defer tx.Rollback(ctx)
+	var id,userID,status string;var metadata []byte;if err=tx.QueryRow(ctx,`SELECT id,user_id,status,metadata FROM payment_intents WHERE provider_reference=$1 AND intent_type='AMEBO_TOKENS' FOR UPDATE`,reference).Scan(&id,&userID,&status,&metadata);err!=nil{return err}
+	if status=="SUCCEEDED"{return tx.Commit(ctx)};if status!="CREATED"&&status!="PENDING"{return fmt.Errorf("payment intent is not settleable")}
+	var payload struct{PackID string `json:"pack_id"`};if json.Unmarshal(metadata,&payload)!=nil{return fmt.Errorf("token pack metadata invalid")};pack,ok:=ameboPacks[payload.PackID];if !ok||pack.Price*100!=amount{return fmt.Errorf("token pack price mismatch")}
+	grant:=ameboDailyGrant(ctx,db,userID);if _,err=tx.Exec(ctx,`INSERT INTO amebo_wallets(user_id,free_tokens,free_expires_at,purchased_tokens) VALUES($1,$2,(date_trunc('day',now() AT TIME ZONE 'Africa/Lagos')+interval '1 day') AT TIME ZONE 'Africa/Lagos',0) ON CONFLICT(user_id) DO NOTHING`,userID,grant);err!=nil{return err}
+	if _,err=tx.Exec(ctx,`UPDATE amebo_wallets SET purchased_tokens=purchased_tokens+$1 WHERE user_id=$2`,pack.Tokens,userID);err!=nil{return err}
+	ledgerID,err:=insertLedger(ctx,tx,userID,"amebo-paystack:"+id,-pack.Price,"AMEBO_TOKENS");if err!=nil{return err}
+	if err=storeSignedReceipt(ctx,tx,userID,"AMEBO_TOKENS",ledgerID,map[string]any{"pack_id":payload.PackID,"tokens":pack.Tokens,"amount_ngn":pack.Price,"reference":reference,"type":"AMEBO_TOKENS","issued_at":time.Now().UTC().Format(time.RFC3339)});err!=nil{return err}
+	if _,err=tx.Exec(ctx,`UPDATE payment_intents SET status='SUCCEEDED',settled_at=now(),updated_at=now() WHERE id=$1`,id);err!=nil{return err}
+	if _,err=tx.Exec(ctx,`INSERT INTO app_notifications(user_id,category,title,body,action_url,payload) VALUES($1,'AMEBO','Amebo tokens added','Your purchased tokens are ready.','/amebo',jsonb_build_object('tokens',$2))`,userID,pack.Tokens);err!=nil{return err}
+	if err=tx.Commit(ctx);err!=nil{return err};go sendPushNotificationToUser(db,userID,"Amebo tokens added","Your purchased tokens are ready.","/amebo");return nil
+}
+
+func settlePaystackVTU(ctx context.Context, db *pgxpool.Pool, reference string) error {
+	var amount int64
+	if err:=db.QueryRow(ctx,`SELECT amount_kobo FROM payment_intents WHERE provider_reference=$1 AND intent_type='VTU_DATA'`,reference).Scan(&amount);err!=nil{return err}
+	if err:=verifyPaystackIntentAmount(ctx,reference,amount);err!=nil{return err}
+	tx,err:=db.Begin(ctx);if err!=nil{return err};defer tx.Rollback(ctx)
+	var intentID,userID,status,idempotency string;var metadata []byte
+	if err=tx.QueryRow(ctx,`SELECT id,user_id,status,idempotency_key,metadata FROM payment_intents WHERE provider_reference=$1 AND intent_type='VTU_DATA' FOR UPDATE`,reference).Scan(&intentID,&userID,&status,&idempotency,&metadata);err!=nil{return err}
+	if status=="SUCCEEDED"{return tx.Commit(ctx)};if status!="CREATED"&&status!="PENDING"{return fmt.Errorf("payment intent is not settleable")}
+	var payload struct{Network string `json:"network"`;PlanCode string `json:"plan_code"`;Phone string `json:"phone"`;Allowance string `json:"allowance"`;Price int64 `json:"price_ngn"`}
+	if json.Unmarshal(metadata,&payload)!=nil||!validVTUNetwork(payload.Network)||payload.PlanCode==""||!validNigerianPhone(payload.Phone)||payload.Price*100!=amount||payload.Allowance==""{return fmt.Errorf("VTU metadata invalid")}
+	key:=strings.TrimPrefix(idempotency,"VTU_DATA:");if key==idempotency||len(key)<12{return fmt.Errorf("VTU idempotency key invalid")}
+	orderID:=uuid.NewString();providerReference:="DRV-"+strings.ReplaceAll(orderID,"-","")
+	if _,err=tx.Exec(ctx,`INSERT INTO vtu_data_orders(id,user_id,plan_code,phone,amount_ngn,provider_reference,status,idempotency_key,network,allowance,attempts) VALUES($1,$2,$3,$4,$5,$6,'PROCESSING',$7,$8,$9,0) ON CONFLICT(user_id,idempotency_key) DO NOTHING`,orderID,userID,payload.PlanCode,payload.Phone,payload.Price,providerReference,key,payload.Network,payload.Allowance);err!=nil{return err}
+	var savedOrder string
+	if err=tx.QueryRow(ctx,`SELECT id FROM vtu_data_orders WHERE user_id=$1 AND idempotency_key=$2`,userID,key).Scan(&savedOrder);err!=nil{return err}
+	ledgerID,err:=insertLedger(ctx,tx,userID,"vtu:"+userID+":"+key,-payload.Price,"VTU_DATA");if err!=nil{return err}
+	if _,err=tx.Exec(ctx,`UPDATE payment_intents SET purpose_id=$2,status='SUCCEEDED',settled_at=now(),updated_at=now() WHERE id=$1`,intentID,savedOrder);err!=nil{return err}
+	if _,err=tx.Exec(ctx,`INSERT INTO app_notifications(user_id,category,title,body,action_url,payload) VALUES($1,'PAYMENT','Data purchase paid','Your data bundle is being delivered.','/data',jsonb_build_object('order_id',$2))`,userID,savedOrder);err!=nil{return err}
+	if err=tx.Commit(ctx);err!=nil{return err}
+	_ = ledgerID
+	return nil
 }
 
 func verifyAndSettleWalletFunding(ctx context.Context, db *pgxpool.Pool, reference string) error {

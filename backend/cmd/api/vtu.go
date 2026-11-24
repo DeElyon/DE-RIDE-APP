@@ -77,13 +77,22 @@ func registerVTURoutes(secure fiber.Router, db *pgxpool.Pool) {
 			req.PaymentMethod = "WALLET"
 		}
 		key := strings.TrimSpace(c.Get("Idempotency-Key"))
-		if !validVTUNetwork(req.Network) || req.PlanCode == "" || len(req.PlanCode) > 100 || !validNigerianPhone(req.Phone) || req.PaymentMethod != "WALLET" || len(key) < 12 || len(key) > 120 {
+		if !validVTUNetwork(req.Network) || req.PlanCode == "" || len(req.PlanCode) > 100 || !validNigerianPhone(req.Phone) || (req.PaymentMethod != "WALLET" && req.PaymentMethod != "PAYSTACK") || len(key) < 12 || len(key) > 120 {
 			return c.Status(422).JSON(errJSON("ERR_VTU_PURCHASE_INVALID"))
 		}
 		var plan vtuPlan
 		err := db.QueryRow(c.UserContext(), `SELECT code,network,allowance,price_ngn FROM vtu_data_plans WHERE code=$1 AND network=$2 AND active=true`, req.PlanCode, req.Network).Scan(&plan.Code, &plan.Network, &plan.Allowance, &plan.Price)
 		if err != nil {
 			return c.Status(404).JSON(errJSON("ERR_VTU_PLAN_NOT_FOUND"))
+		}
+		if req.PaymentMethod == "PAYSTACK" {
+			if os.Getenv("PAYSTACK_SECRET_KEY") == "" || !receiptSigningConfigured() { return c.Status(503).JSON(errJSON("ERR_PAYMENT_SERVICE_NOT_CONFIGURED")) }
+			var email string
+			if err = db.QueryRow(c.UserContext(),`SELECT email FROM users WHERE id=$1 AND email_verified=true`,me.UserID).Scan(&email);err!=nil{return c.Status(403).JSON(errJSON("ERR_EMAIL_VERIFICATION_REQUIRED"))}
+			metadata:=map[string]any{"network":plan.Network,"plan_code":plan.Code,"phone":req.Phone,"allowance":plan.Allowance,"price_ngn":plan.Price}
+			id,reference,authURL,accessCode,intentErr:=createPurposePaystackIntent(c.UserContext(),db,me.UserID,email,"VTU_DATA",key,plan.Price*100,metadata)
+			if intentErr!=nil{return c.Status(409).JSON(errJSON("ERR_PAYSTACK_INITIALIZE_FAILED"))}
+			return c.Status(201).JSON(fiber.Map{"payment_intent_id":id,"reference":reference,"authorization_url":authURL,"access_code":accessCode,"status":"PENDING","network":plan.Network,"allowance":plan.Allowance,"amount_ngn":plan.Price})
 		}
 		tx, err := db.Begin(c.UserContext())
 		if err != nil {

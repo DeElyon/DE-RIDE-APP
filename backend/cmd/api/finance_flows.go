@@ -333,11 +333,14 @@ func registerFinanceFlowRoutes(secure fiber.Router, db *pgxpool.Pool) {
 		me := c.Locals("identity").(identity)
 		var req struct {
 			PlanID string `json:"plan_id"`
+			PaymentMethod string `json:"payment_method"`
 		}
 		if err := c.BodyParser(&req); err != nil {
 			return c.Status(400).JSON(errJSON("ERR_INVALID_REQUEST"))
 		}
 		req.PlanID = strings.TrimSpace(req.PlanID)
+		req.PaymentMethod = strings.ToUpper(strings.TrimSpace(req.PaymentMethod))
+		if req.PaymentMethod == "" { req.PaymentMethod = "WALLET" }
 		key := strings.TrimSpace(c.Get("Idempotency-Key"))
 		if req.PlanID == "" {
 			return c.Status(422).JSON(errJSON("ERR_SUBSCRIPTION_PLAN_REQUIRED"))
@@ -377,6 +380,16 @@ func registerFinanceFlowRoutes(secure fiber.Router, db *pgxpool.Pool) {
 			_ = tx.Commit(c.UserContext())
 			return c.JSON(fiber.Map{"plan_id": req.PlanID, "status": "ACTIVE"})
 		}
+		if price > 0 && req.PaymentMethod == "PAYSTACK" {
+			_ = tx.Rollback(c.UserContext())
+			if os.Getenv("PAYSTACK_SECRET_KEY") == "" || !receiptSigningConfigured() { return c.Status(503).JSON(errJSON("ERR_PAYMENT_SERVICE_NOT_CONFIGURED")) }
+			var email string
+			if err = db.QueryRow(c.UserContext(), `SELECT email FROM users WHERE id=$1 AND email_verified=true`, me.UserID).Scan(&email); err != nil { return c.Status(403).JSON(errJSON("ERR_EMAIL_VERIFICATION_REQUIRED")) }
+			id,reference,authURL,accessCode,intentErr := createPurposePaystackIntent(c.UserContext(),db,me.UserID,email,"SUBSCRIPTION",key,price*100,map[string]any{"plan_id":req.PlanID})
+			if intentErr != nil { return c.Status(409).JSON(errJSON("ERR_PAYSTACK_INITIALIZE_FAILED")) }
+			return c.Status(201).JSON(fiber.Map{"payment_intent_id":id,"reference":reference,"authorization_url":authURL,"access_code":accessCode,"plan_id":req.PlanID,"status":"PENDING"})
+		}
+		if req.PaymentMethod != "WALLET" { return c.Status(422).JSON(errJSON("ERR_PAYMENT_METHOD_INVALID")) }
 		if currentID != "" {
 			if _, err = tx.Exec(c.UserContext(), `UPDATE subscriptions SET status='SUPERSEDED',ends_at=now() WHERE user_id=$1 AND status='ACTIVE'`, me.UserID); err != nil {
 				return c.Status(500).JSON(errJSON("ERR_SUBSCRIPTION_UPDATE_FAILED"))
