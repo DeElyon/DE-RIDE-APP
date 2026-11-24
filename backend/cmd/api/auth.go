@@ -62,10 +62,21 @@ func registerAuthRoutes(v1 fiber.Router, db *pgxpool.Pool) {
 			return c.Status(503).JSON(errJSON("ERR_DATABASE_UNAVAILABLE"))
 		}
 		defer tx.Rollback(c.UserContext())
+		requestedRole := body.Role
+		activeRole := body.Role
+		if requestedRole == "DISPATCHER" || requestedRole == "PARK_OPERATOR" || requestedRole == "BIKER" || requestedRole == "DISPATCH_RIDER" {
+			activeRole = "PASSENGER"
+		}
 		var userID string
-		err = tx.QueryRow(c.UserContext(), `INSERT INTO users(email,password_hash,active_role,roles,display_name,phone_number) VALUES($1,$2,$3,ARRAY[$3]::text[],$4,$5) RETURNING id`, body.Email, digest, body.Role, strings.TrimSpace(body.Name), body.PhoneNumber).Scan(&userID)
+		err = tx.QueryRow(c.UserContext(), `INSERT INTO users(email,password_hash,active_role,roles,display_name,phone_number) VALUES($1,$2,$3,ARRAY[$3]::text[],$4,$5) RETURNING id`, body.Email, digest, activeRole, strings.TrimSpace(body.Name), body.PhoneNumber).Scan(&userID)
 		if err != nil {
 			return c.Status(409).JSON(errJSON("ERR_EMAIL_ALREADY_REGISTERED"))
+		}
+		if requestedRole != activeRole {
+			if _, err = tx.Exec(c.UserContext(), `INSERT INTO role_requests(user_id,requested_role) VALUES($1,$2)`, userID, requestedRole); err != nil {
+				return c.Status(500).JSON(errJSON("ERR_ROLE_REQUEST_CREATE_FAILED"))
+			}
+			_, _ = tx.Exec(c.UserContext(), `INSERT INTO role_audit_log(user_id,actor_id,action,role,note) VALUES($1,$1,'REQUESTED',$2,'Initial account role selection')`, userID, requestedRole)
 		}
 		otpExpiryMinutes := envInt32("OTP_EXPIRY_MINUTES", 10)
 		if _, err = tx.Exec(c.UserContext(), `INSERT INTO email_otps(user_id,otp_hash,expires_at) VALUES($1,$2,now()+make_interval(mins=>$3))`, userID, otpHash(code), otpExpiryMinutes); err != nil {

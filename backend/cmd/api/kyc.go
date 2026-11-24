@@ -145,9 +145,10 @@ func registerKYCRoutes(secure fiber.Router, db *pgxpool.Pool) {
 		if req.Decision == "APPROVED" {
 			kycStatus = "VERIFIED"
 		}
-		if _, err = tx.Exec(c.UserContext(), `UPDATE users SET kyc_status=$1,biker_approved=CASE WHEN $2 IN ('BIKE','DISPATCH_BIKE') AND $3='APPROVED' THEN true ELSE biker_approved END,dispatch_approved=CASE WHEN $2='DISPATCH_BIKE' AND $3='APPROVED' THEN true ELSE dispatch_approved END,updated_at=now() WHERE id=$4`, kycStatus, vehicleType, req.Decision, ownerID); err != nil {
+		if _, err = tx.Exec(c.UserContext(), `UPDATE users SET kyc_status=$1,biker_approved=CASE WHEN $2 IN ('BIKE','DISPATCH_BIKE') AND $3='APPROVED' THEN true ELSE biker_approved END,dispatch_approved=CASE WHEN $2='DISPATCH_BIKE' AND $3='APPROVED' THEN true ELSE dispatch_approved END,roles=CASE WHEN $3='APPROVED' THEN ARRAY(SELECT DISTINCT r FROM unnest(roles || CASE WHEN $2 IN ('BIKE','DISPATCH_BIKE') THEN ARRAY['BIKER']::text[] || CASE WHEN $2='DISPATCH_BIKE' THEN ARRAY['DISPATCH_RIDER']::text[] ELSE ARRAY[]::text[] END ELSE ARRAY['DRIVER']::text[] END) AS granted(r) ORDER BY r) ELSE roles END,updated_at=now() WHERE id=$4`, kycStatus, vehicleType, req.Decision, ownerID); err != nil {
 			return c.Status(500).JSON(errJSON("ERR_KYC_USER_UPDATE_FAILED"))
 		}
+		if req.Decision=="APPROVED" { grantedRole:="DRIVER";if vehicleType=="BIKE"||vehicleType=="DISPATCH_BIKE"{grantedRole="BIKER"};_,_=tx.Exec(c.UserContext(),`UPDATE role_requests SET status='APPROVED',reviewed_by=$2,reviewed_at=now(),review_note='Approved with vehicle KYC' WHERE user_id=$1 AND requested_role=$3 AND status='PENDING'`,ownerID,admin.UserID,grantedRole);if vehicleType=="DISPATCH_BIKE"{_,_=tx.Exec(c.UserContext(),`UPDATE role_requests SET status='APPROVED',reviewed_by=$2,reviewed_at=now(),review_note='Approved with dispatch KYC' WHERE user_id=$1 AND requested_role='DISPATCH_RIDER' AND status='PENDING'`,ownerID,admin.UserID)} }
 		_, _ = tx.Exec(c.UserContext(), `INSERT INTO app_notifications(user_id,category,title,body,action_url) VALUES($1,'KYC','Vehicle verification update',$2,'/notifications')`, ownerID, "Your vehicle registration was "+strings.ToLower(req.Decision)+".")
 		if err = tx.Commit(c.UserContext()); err != nil {
 			return c.Status(500).JSON(errJSON("ERR_KYC_REVIEW_COMMIT_FAILED"))

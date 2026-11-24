@@ -1,2 +1,3 @@
 import { AppDashboard } from '@/components/app-dashboard';
-export default function Biker(){return <AppDashboard requiredRole="BIKER"/>}
+import { RiderJobs } from '@/components/rider-jobs';
+export default function Biker(){return <><AppDashboard requiredRole="BIKER"/><RiderJobs mode="BIKER"/></>}

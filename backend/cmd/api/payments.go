@@ -544,7 +544,9 @@ func verifyAndSettleTicketCheckout(ctx context.Context, db *pgxpool.Pool, refere
 	if err = storeSignedReceipt(ctx, tx, userID, "TICKET_PURCHASE", ledgerID, claims); err != nil {
 		return err
 	}
-	if _,err=tx.Exec(ctx,`UPDATE signed_receipts SET payment_intent_id=$1 WHERE ledger_entry_id=$2`,intentID,ledgerID);err!=nil{return err}
+	if _, err = tx.Exec(ctx, `UPDATE signed_receipts SET payment_intent_id=$1 WHERE ledger_entry_id=$2`, intentID, ledgerID); err != nil {
+		return err
+	}
 	if _, err = tx.Exec(ctx, `UPDATE tickets SET status='CONFIRMED' WHERE id=$1`, ticketID); err != nil {
 		return err
 	}

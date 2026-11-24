@@ -277,10 +277,11 @@ func registerFinanceFlowRoutes(secure fiber.Router, db *pgxpool.Pool) {
 			return c.Status(503).JSON(errJSON("ERR_DATABASE_UNAVAILABLE"))
 		}
 		defer tx.Rollback(c.UserContext())
-		var passengerID, tripID, ticketStatus, refundStatus, paymentStatus string
+		var passengerID, tripID, ticketStatus, refundStatus, paymentStatus, tripStatus string
 		var fare int64
 		var departure time.Time
-		err = tx.QueryRow(c.UserContext(), `SELECT k.passenger_id,k.trip_id,k.base_fare_ngn,k.status,k.refund_status,t.departure_at,COALESCE((SELECT p.status FROM payment_intents p WHERE p.purpose_id=k.id ORDER BY p.created_at DESC LIMIT 1),'SUCCEEDED') FROM tickets k JOIN trips t ON t.id=k.trip_id WHERE k.id=$1 FOR UPDATE OF k`, c.Params("ticketID")).Scan(&passengerID, &tripID, &fare, &ticketStatus, &refundStatus, &departure, &paymentStatus)
+		var scannedAt *time.Time
+		err = tx.QueryRow(c.UserContext(), `SELECT k.passenger_id,k.trip_id,k.base_fare_ngn,k.status,k.refund_status,COALESCE(t.departed_at,t.departure_at),COALESCE((SELECT p.status FROM payment_intents p WHERE p.purpose_id=k.id ORDER BY p.created_at DESC LIMIT 1),'SUCCEEDED'),t.status,k.scanned_at FROM tickets k JOIN trips t ON t.id=k.trip_id WHERE k.id=$1 FOR UPDATE OF k`, c.Params("ticketID")).Scan(&passengerID, &tripID, &fare, &ticketStatus, &refundStatus, &departure, &paymentStatus, &tripStatus, &scannedAt)
 		if err != nil || passengerID != me.UserID {
 			return c.Status(404).JSON(errJSON("ERR_TICKET_NOT_FOUND"))
 		}
@@ -290,13 +291,13 @@ func registerFinanceFlowRoutes(secure fiber.Router, db *pgxpool.Pool) {
 		if ticketStatus == "CANCELLED" || ticketStatus == "REFUNDED" || refundStatus != "NONE" {
 			return c.Status(409).JSON(errJSON("ERR_TICKET_ALREADY_REFUNDED"))
 		}
-		if req.Claim == "CANCEL" && time.Now().After(departure) {
+		if req.Claim == "CANCEL" && (tripStatus != "OPEN" && tripStatus != "BOARDING" || time.Now().After(departure)) {
 			return c.Status(422).JSON(errJSON("ERR_CANCELLATION_WINDOW_CLOSED"))
 		}
-		if req.Claim == "LATE_ARRIVAL" && time.Now().Sub(departure) <= 10*time.Minute {
+		if req.Claim == "LATE_ARRIVAL" && (scannedAt == nil || !scannedAt.After(departure.Add(10*time.Minute))) {
 			return c.Status(422).JSON(errJSON("ERR_REFUND_WINDOW_INVALID"))
 		}
-		if req.Claim == "NO_SHOW" && time.Now().Before(departure.Add(10*time.Minute)) {
+		if req.Claim == "NO_SHOW" && (tripStatus != "ARRIVED" || scannedAt != nil || time.Now().Before(departure.Add(10*time.Minute))) {
 			return c.Status(422).JSON(errJSON("ERR_NO_SHOW_WINDOW_INVALID"))
 		}
 		refund, err := finance.Refund(fare, pct)

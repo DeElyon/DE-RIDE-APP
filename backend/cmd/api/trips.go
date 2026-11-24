@@ -11,10 +11,10 @@ import (
 func registerTripRoutes(secure fiber.Router, db *pgxpool.Pool) {
 	secure.Get("/my-trips", func(c *fiber.Ctx) error {
 		me := c.Locals("identity").(identity)
-		if me.Role != "DRIVER" && me.Role != "ADMIN" {
+		if me.Role != "DRIVER" && me.Role != "DISPATCHER" && me.Role != "PARK_OPERATOR" && me.Role != "ADMIN" {
 			return c.Status(403).JSON(errJSON("ERR_ROLE_FORBIDDEN"))
 		}
-		rows, err := db.Query(c.UserContext(), `SELECT t.id,p.name,t.departure_at,t.status FROM trips t JOIN bus_parks p ON p.id=t.park_id WHERE ($1='ADMIN' OR t.driver_id=$2) ORDER BY t.departure_at DESC LIMIT 100`, me.Role, me.UserID)
+		rows, err := db.Query(c.UserContext(), `SELECT t.id,p.name,t.departure_at,t.status FROM trips t JOIN bus_parks p ON p.id=t.park_id WHERE ($1='ADMIN' OR t.driver_id=$2 OR ($1='DISPATCHER' AND EXISTS(SELECT 1 FROM trip_operator_assignments a WHERE a.trip_id=t.id AND a.user_id=$2)) OR ($1='PARK_OPERATOR' AND EXISTS(SELECT 1 FROM park_operator_assignments a WHERE a.park_id=t.park_id AND a.user_id=$2))) ORDER BY t.departure_at DESC LIMIT 100`, me.Role, me.UserID)
 		if err != nil {
 			return c.Status(503).JSON(errJSON("ERR_TRIPS_UNAVAILABLE"))
 		}
@@ -36,7 +36,7 @@ func registerTripRoutes(secure fiber.Router, db *pgxpool.Pool) {
 	secure.Get("/trips/:tripID/messages", func(c *fiber.Ctx) error {
 		me := c.Locals("identity").(identity)
 		var allowed, expired bool
-		err := db.QueryRow(c.UserContext(), `SELECT EXISTS(SELECT 1 FROM trips t WHERE t.id=$1 AND (t.driver_id=$2 OR EXISTS(SELECT 1 FROM tickets k WHERE k.trip_id=t.id AND k.passenger_id=$2) OR ($3='ADMIN' AND EXISTS(SELECT 1 FROM escalations e WHERE e.trip_id=t.id AND e.status IN ('OPEN','IN_PROGRESS'))))),EXISTS(SELECT 1 FROM trips t WHERE t.id=$1 AND t.arrived_at IS NOT NULL AND now()>t.arrived_at+interval '6 minutes' AND NOT EXISTS(SELECT 1 FROM escalations e WHERE e.trip_id=t.id))`, c.Params("tripID"), me.UserID, me.Role).Scan(&allowed, &expired)
+		err := db.QueryRow(c.UserContext(), `SELECT EXISTS(SELECT 1 FROM trips t WHERE t.id=$1 AND (t.driver_id=$2 OR EXISTS(SELECT 1 FROM tickets k WHERE k.trip_id=t.id AND k.passenger_id=$2) OR EXISTS(SELECT 1 FROM trip_operator_assignments a WHERE a.trip_id=t.id AND a.user_id=$2) OR EXISTS(SELECT 1 FROM park_operator_assignments a WHERE a.park_id=t.park_id AND a.user_id=$2) OR ($3='ADMIN' AND EXISTS(SELECT 1 FROM escalations e WHERE e.trip_id=t.id AND e.status IN ('OPEN','IN_PROGRESS'))))),EXISTS(SELECT 1 FROM trips t WHERE t.id=$1 AND t.arrived_at IS NOT NULL AND now()>t.arrived_at+interval '6 minutes' AND NOT EXISTS(SELECT 1 FROM escalations e WHERE e.trip_id=t.id))`, c.Params("tripID"), me.UserID, me.Role).Scan(&allowed, &expired)
 		if err != nil || !allowed {
 			return c.Status(404).JSON(errJSON("ERR_TRIP_ACCESS_DENIED"))
 		}
@@ -166,10 +166,10 @@ func registerTripRoutes(secure fiber.Router, db *pgxpool.Pool) {
 			var amount int64
 			var departure time.Time
 			var authorizationURL *string
-			if err = rows.Scan(&id, &tripID, &seat, &manual, &qr, &amount, &status, &park, &departure,&authorizationURL); err != nil {
+			if err = rows.Scan(&id, &tripID, &seat, &manual, &qr, &amount, &status, &park, &departure, &authorizationURL); err != nil {
 				return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
 			}
-			items = append(items, fiber.Map{"id": id, "trip_id": tripID, "seat_code": seat, "manual_code": manual, "qr_payload": qr, "total_paid_ngn": amount, "status": status, "park_name": park, "departure_at": departure,"authorization_url":authorizationURL})
+			items = append(items, fiber.Map{"id": id, "trip_id": tripID, "seat_code": seat, "manual_code": manual, "qr_payload": qr, "total_paid_ngn": amount, "status": status, "park_name": park, "departure_at": departure, "authorization_url": authorizationURL})
 		}
 		if err = rows.Err(); err != nil {
 			return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
