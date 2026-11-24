@@ -108,6 +108,46 @@ func main() {
 		return c.JSON(fiber.Map{"active_parks": active, "nationwide_parks": nationwide, "verified_buses": boarding, "online_riders": onlineRiders, "average_wait_saved": waitMinutes})
 	})
 	secure := v1.Group("", authenticate(os.Getenv("JWT_ACCESS_SECRET"), db))
+	secure.Get("/me", func(c *fiber.Ctx) error {
+		me := c.Locals("identity").(identity)
+		_, _ = db.Exec(c.UserContext(), `INSERT INTO wallet_accounts(user_id,balance_ngn) VALUES($1,0) ON CONFLICT(user_id) DO NOTHING`, me.UserID)
+		_, _ = db.Exec(c.UserContext(), `INSERT INTO amebo_wallets(user_id,free_tokens,free_expires_at,purchased_tokens) VALUES($1,10,(date_trunc('day',now() AT TIME ZONE 'Africa/Lagos')+interval '1 day') AT TIME ZONE 'Africa/Lagos',0) ON CONFLICT(user_id) DO NOTHING`, me.UserID)
+		_, _ = db.Exec(c.UserContext(), `UPDATE amebo_wallets SET free_tokens=10,free_expires_at=(date_trunc('day',now() AT TIME ZONE 'Africa/Lagos')+interval '1 day') AT TIME ZONE 'Africa/Lagos' WHERE user_id=$1 AND free_expires_at<=now()`, me.UserID)
+		var id, email, displayName, role string
+		var roles []string
+		var emailVerified, bikerApproved, dispatchApproved, gpsOptIn bool
+		var createdAt time.Time
+		var balance int64
+		var freeTokens, purchasedTokens int
+		var freeExpiresAt *time.Time
+		err := db.QueryRow(c.UserContext(), `SELECT u.id,u.email,u.display_name,u.active_role,u.roles,u.email_verified,u.biker_approved,u.dispatch_approved,u.gps_opt_in,u.created_at,COALESCE(w.balance_ngn,0),COALESCE(a.free_tokens,0),COALESCE(a.purchased_tokens,0),a.free_expires_at FROM users u LEFT JOIN wallet_accounts w ON w.user_id=u.id LEFT JOIN amebo_wallets a ON a.user_id=u.id WHERE u.id=$1`, me.UserID).Scan(&id, &email, &displayName, &role, &roles, &emailVerified, &bikerApproved, &dispatchApproved, &gpsOptIn, &createdAt, &balance, &freeTokens, &purchasedTokens, &freeExpiresAt)
+		if err != nil {
+			return c.Status(503).JSON(errJSON("ERR_PROFILE_UNAVAILABLE"))
+		}
+		return c.JSON(fiber.Map{"id": id, "email": email, "display_name": displayName, "active_role": role, "roles": roles, "email_verified": emailVerified, "biker_approved": bikerApproved, "dispatch_approved": dispatchApproved, "gps_opt_in": gpsOptIn, "created_at": createdAt, "wallet_balance_ngn": balance, "amebo_free_tokens": freeTokens, "amebo_purchased_tokens": purchasedTokens, "amebo_free_expires_at": freeExpiresAt})
+	})
+	secure.Get("/wallet/transactions", func(c *fiber.Ctx) error {
+		me := c.Locals("identity").(identity)
+		rows, err := db.Query(c.UserContext(), `SELECT id,entry_type,amount_ngn,created_at FROM ledger_entries WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50`, me.UserID)
+		if err != nil {
+			return c.Status(503).JSON(errJSON("ERR_WALLET_UNAVAILABLE"))
+		}
+		defer rows.Close()
+		entries := make([]fiber.Map, 0)
+		for rows.Next() {
+			var id, entryType string
+			var amount int64
+			var createdAt time.Time
+			if err = rows.Scan(&id, &entryType, &amount, &createdAt); err != nil {
+				return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
+			}
+			entries = append(entries, fiber.Map{"id": id, "type": entryType, "amount_ngn": amount, "created_at": createdAt})
+		}
+		if err = rows.Err(); err != nil {
+			return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
+		}
+		return c.JSON(fiber.Map{"transactions": entries})
+	})
 	secure.Post("/ws-ticket", func(c *fiber.Ctx) error {
 		me := c.Locals("identity").(identity)
 		ticket := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"sub": me.UserID, "role": me.Role, "token_type": "websocket", "jti": uuid.NewString(), "exp": time.Now().Add(30 * time.Second).Unix()})
@@ -228,13 +268,23 @@ func main() {
 		if err = tx.Commit(c.UserContext()); err != nil {
 			return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
 		}
-		secret := []byte(os.Getenv("JWT_ACCESS_SECRET"))
-		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"sub": me.UserID, "role": in.Mode, "exp": time.Now().Add(time.Hour).Unix()})
-		signed, err := token.SignedString(secret)
+		if _, err = db.Exec(c.UserContext(), `UPDATE auth_refresh_tokens SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL`, me.UserID); err != nil {
+			return c.Status(500).JSON(errJSON("ERR_SESSION_REVOKE"))
+		}
+		newTx, err := db.Begin(c.UserContext())
+		if err != nil {
+			return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
+		}
+		defer newTx.Rollback(c.UserContext())
+		pair, err := createTokenPair(c.UserContext(), newTx, me.UserID, in.Mode)
 		if err != nil {
 			return c.Status(500).JSON(errJSON("ERR_TOKEN_ISSUE"))
 		}
-		return c.JSON(fiber.Map{"active_role": in.Mode, "access_token": signed})
+		if err = newTx.Commit(c.UserContext()); err != nil {
+			return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
+		}
+		pair["active_role"] = in.Mode
+		return c.JSON(pair)
 	})
 	secure.Post("/trips/:id/capacity", func(c *fiber.Ctx) error {
 		me := c.Locals("identity").(identity)
@@ -316,6 +366,15 @@ func authenticate(secret string, db *pgxpool.Pool) fiber.Handler {
 		}
 		if sub == "" || role == "" {
 			return c.Status(401).JSON(errJSON("ERR_INVALID_TOKEN"))
+		}
+		if !ticketAuth {
+			sessionID, _ := claims["sid"].(string)
+			if sessionID != "" {
+				var active bool
+				if err := db.QueryRow(c.UserContext(), `SELECT EXISTS(SELECT 1 FROM auth_refresh_tokens WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL AND expires_at>now())`, sessionID, sub).Scan(&active); err != nil || !active {
+					return c.Status(401).JSON(errJSON("ERR_SESSION_REVOKED"))
+				}
+			}
 		}
 		var activeRole string
 		if err := db.QueryRow(c.UserContext(), `SELECT active_role FROM users WHERE id=$1`, sub).Scan(&activeRole); err != nil {

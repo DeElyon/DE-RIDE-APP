@@ -69,6 +69,12 @@ func registerAuthRoutes(v1 fiber.Router, db *pgxpool.Pool) {
 		if _, err = tx.Exec(c.UserContext(), `INSERT INTO email_otps(user_id,otp_hash,expires_at) VALUES($1,$2,now()+make_interval(mins=>$3))`, userID, otpHash(code), otpExpiryMinutes); err != nil {
 			return c.Status(500).JSON(errJSON("ERR_OTP_CREATE"))
 		}
+		if _, err = tx.Exec(c.UserContext(), `INSERT INTO wallet_accounts(user_id,balance_ngn) VALUES($1,0) ON CONFLICT(user_id) DO NOTHING`, userID); err != nil {
+			return c.Status(500).JSON(errJSON("ERR_WALLET_INITIALIZE"))
+		}
+		if _, err = tx.Exec(c.UserContext(), `INSERT INTO amebo_wallets(user_id,free_tokens,free_expires_at,purchased_tokens) VALUES($1,10,(date_trunc('day',now() AT TIME ZONE 'Africa/Lagos') + interval '1 day') AT TIME ZONE 'Africa/Lagos',0) ON CONFLICT(user_id) DO NOTHING`, userID); err != nil {
+			return c.Status(500).JSON(errJSON("ERR_TOKEN_WALLET_INITIALIZE"))
+		}
 		if err = tx.Commit(c.UserContext()); err != nil {
 			return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
 		}
@@ -190,6 +196,41 @@ func registerAuthRoutes(v1 fiber.Router, db *pgxpool.Pool) {
 		}
 		return c.JSON(response)
 	})
+	v1.Post("/auth/logout", func(c *fiber.Ctx) error {
+		var body struct {
+			RefreshToken string `json:"refresh_token"`
+		}
+		if err := c.BodyParser(&body); err != nil || body.RefreshToken == "" {
+			return c.Status(400).JSON(errJSON("ERR_INVALID_REQUEST"))
+		}
+		secret := os.Getenv("JWT_REFRESH_SECRET")
+		parsed, err := jwt.Parse(body.RefreshToken, func(token *jwt.Token) (any, error) {
+			if token.Method.Alg() != jwt.SigningMethodHS256.Alg() {
+				return nil, jwt.ErrSignatureInvalid
+			}
+			return []byte(secret), nil
+		})
+		if err != nil || !parsed.Valid {
+			return c.Status(401).JSON(errJSON("ERR_INVALID_REFRESH_TOKEN"))
+		}
+		claims, ok := parsed.Claims.(jwt.MapClaims)
+		if !ok || claims["token_type"] != "refresh" {
+			return c.Status(401).JSON(errJSON("ERR_INVALID_REFRESH_TOKEN"))
+		}
+		userID, _ := claims["sub"].(string)
+		jti, _ := claims["jti"].(string)
+		if userID == "" || jti == "" {
+			return c.Status(401).JSON(errJSON("ERR_INVALID_REFRESH_TOKEN"))
+		}
+		result, err := db.Exec(c.UserContext(), `UPDATE auth_refresh_tokens SET revoked_at=now() WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL`, jti, userID)
+		if err != nil {
+			return c.Status(503).JSON(errJSON("ERR_DATABASE_UNAVAILABLE"))
+		}
+		if result.RowsAffected() == 0 {
+			return c.Status(401).JSON(errJSON("ERR_REFRESH_TOKEN_REVOKED"))
+		}
+		return c.JSON(fiber.Map{"status": "SIGNED_OUT"})
+	})
 }
 
 func issueToken(c *fiber.Ctx, userID, role string, db *pgxpool.Pool) error {
@@ -227,7 +268,7 @@ func createTokenPair(ctx context.Context, tx pgx.Tx, userID, role string) (fiber
 	if err != nil {
 		return nil, err
 	}
-	access := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"sub": userID, "role": role, "exp": accessExpiry.Unix(), "iat": now.Unix()})
+	access := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"sub": userID, "role": role, "sid": refreshID, "exp": accessExpiry.Unix(), "iat": now.Unix()})
 	accessToken, err := access.SignedString([]byte(os.Getenv("JWT_ACCESS_SECRET")))
 	if err != nil {
 		return nil, err
