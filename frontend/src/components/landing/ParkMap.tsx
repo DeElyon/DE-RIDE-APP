@@ -24,7 +24,8 @@ export function ParkMap({ parks, origin, destination, onReverse }: { parks: Park
     let map: MapLibreMap | null = null;
     void import('maplibre-gl').then(maplibregl => {
       if (cancelled || !container.current) return;
-      const createdMap = new maplibregl.Map({ container: container.current, style: process.env.NEXT_PUBLIC_OPENFREEMAP_STYLE ?? 'https://tiles.openfreemap.org/styles/dark', center: [7.5, 6.5], zoom: 5.3, attributionControl: false });
+      maplibregl.setWorkerUrl(new URL('maplibre-gl/dist/maplibre-gl-worker.mjs', import.meta.url).toString());
+      const createdMap = new maplibregl.Map({ container: container.current, style: 'https://tiles.openfreemap.org/styles/dark', center: [3.3792, 6.5244], zoom: 11, attributionControl: false });
       map = createdMap;
       mapRef.current = createdMap;
       let styleLoaded = false;
