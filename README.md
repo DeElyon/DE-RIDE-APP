@@ -8,6 +8,16 @@ Copy `backend/.env.example`, `ai/.env.example`, and `frontend/.env.example` to l
 
 Apply migrations from `backend/` with `go run ../database/scripts/migrate.go`; this uses `DATABASE_URL` and runs ordered, unapplied SQL files transactionally. Seed scripts do not create fake users, park locations, transactions, operational activity, or unapproved rank prizes. Load verified park boundaries, approved reward schedules, and administrator accounts through controlled provisioning. Subscription seeds include only the specified ₦60,000 passenger plan and ₦250 per-bus trip option.
 
+Generate and check a local QR signing key pair (the private file is ignored by Git):
+
+```sh
+openssl genrsa -out private_key.pem 2048
+openssl rsa -in private_key.pem -pubout -out public_key.pem
+openssl rsa -in private_key.pem -noout -check
+```
+
+Set the key contents as `QR_PRIVATE_KEY_PEM` and `QR_PUBLIC_KEY_PEM` in the backend environment, with a stable `QR_KEY_ID`. Set the matching public key and key ID in the frontend build environment as `NEXT_PUBLIC_QR_PUBLIC_KEY_PEM` and `NEXT_PUBLIC_QR_KEY_ID`. Never set the private key in a frontend variable.
+
 Start services in separate terminals:
 
 ```sh
@@ -16,7 +26,7 @@ cd ai && uvicorn app.main:app --reload
 cd frontend && npm ci && npm run dev
 ```
 
-The current Go API implements database health, park reads, Argon2id password registration/login, email OTP verification, active-role JWT validation, rider-mode switching, and assigned-operator capacity/departure updates. The cooldown is enforced in Postgres so it holds across API restarts. Amebo chat, trivia, and voice transcription call Groq when configured; its internal key is mandatory. Offline ticket helpers verify P-256 ECDSA payloads and manual ticket checksums, but require a matching backend signer and public key to issue production tickets.
+The current Go API implements database health, park reads, Argon2id password registration/login, email OTP verification, active-role JWT validation, rider-mode switching, and assigned-operator capacity/departure updates. The cooldown is enforced in Postgres so it holds across API restarts. Amebo chat, trivia, and voice transcription call Groq when configured; its internal key is mandatory. Offline ticket helpers verify RSA-2048 / SHA-256 signed payloads and manual ticket checksums. The booking screen renders signed QR tickets with the DE RIDE mark, and uses idempotent checkout plus a server-side seat recheck.
 
 ## Financial and safety invariants
 
@@ -26,11 +36,11 @@ Memory cache and websocket state are process-local and must not be used as a fin
 
 ## Deployment
 
-Deploy `frontend/` as the Vercel project root. Set `NEXT_PUBLIC_API_BASE_URL` to the Render API URL plus `/api/v1`, for example `https://deride-api.onrender.com/api/v1`; set `NEXT_PUBLIC_WS_URL` to `wss://deride-api.onrender.com/api/v1/ws` only for authenticated realtime clients. Set `NEXT_PUBLIC_OPENFREEMAP_STYLE` to `https://tiles.openfreemap.org/styles/liberty`. These `NEXT_PUBLIC_*` values are embedded at build time, so configure them before each Vercel build.
+Deploy `frontend/` as the Vercel project root. Set `NEXT_PUBLIC_API_BASE_URL` to the Render API URL plus `/api/v1`, for example `https://deride-api.onrender.com/api/v1`; set `NEXT_PUBLIC_WS_URL` to `wss://deride-api.onrender.com/api/v1/ws` only for authenticated realtime clients. Set `NEXT_PUBLIC_OPENFREEMAP_STYLE` to `https://tiles.openfreemap.org/styles/dark` for the logo-matched dark map. These `NEXT_PUBLIC_*` values are embedded at build time, so configure them before each Vercel build.
 
-The Render blueprints are `backend/render.yaml` and `ai/render.yaml`. The API builds from the repository root; the AI service uses `ai/` as its Docker build context. The API pre-deploy command runs the included migration binary against `DATABASE_URL`; create a Neon database with PostGIS available and supply that URL to Render. Set `ALLOWED_ORIGINS` to the exact Vercel production origin. Set the same high-entropy `INTERNAL_AI_SHARED_SECRET` on both Render services, set API `AI_SERVICE_URL` to the private Render AI service URL, and set `GROQ_API_KEY` on the AI service. Configure `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET` as separate secrets of at least 32 characters. SMTP credentials are required for registration OTP delivery.
+The Render blueprints are `backend/render.yaml` and `ai/render.yaml`. The API builds from the repository root; the AI service uses `ai/` as its Docker build context. The API pre-deploy command runs the included migration binary against `DATABASE_URL`; create a Neon database with PostGIS available and supply that URL to Render. Set `ALLOWED_ORIGINS` to the exact Vercel production origin. Set the same high-entropy `INTERNAL_AI_SHARED_SECRET` on both Render services, set API `AI_SERVICE_URL` to the private Render AI service URL, and set `GROQ_API_KEY` on the AI service. Configure `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET` as separate secrets of at least 32 characters. SMTP credentials are required for registration OTP delivery. Set backend `QR_PRIVATE_KEY_PEM`, `QR_PUBLIC_KEY_PEM`, and `QR_KEY_ID` in Render; set frontend `NEXT_PUBLIC_APP_URL`, `NEXT_PUBLIC_QR_PUBLIC_KEY_PEM`, and `NEXT_PUBLIC_QR_KEY_ID` in Vercel before building so generated sitemaps and offline verification use the production host/key.
 
-In-memory cache and WebSocket room membership are per Render process and have no separate cache service charge. Use a single API instance for these realtime rooms; multiple instances do not share rooms. Database migrations are deployed automatically by Render's pre-deploy command.
+Render provides the public service entry point, but the API must remain at one instance while chat rooms, cooldowns, and caches are process-local. A multi-instance load-balanced API needs shared pub/sub and distributed cooldown/cache storage before it is safe to scale. Database migrations are deployed automatically by Render's pre-deploy command.
 
 GitHub Actions run service checks, and `.github/workflows/create-delete-neon-branch.yml` creates expiring PR branches and removes them when PRs close. Set `NEON_PROJECT_ID` as a repository variable and `NEON_API_KEY` as a repository secret.
 
