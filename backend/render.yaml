@@ -3,7 +3,7 @@ services:
     name: deride-api
     runtime: docker
     # The Dockerfile copies both backend/ and database/, so its context must be the repo root.
-    dockerContext: .
+    dockerContext: ..
     dockerfilePath: ./backend/Dockerfile
     healthCheckPath: /healthz
     preDeployCommand: MIGRATIONS_DIR=/database/migrations /migrate
