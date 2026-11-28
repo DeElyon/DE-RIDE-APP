@@ -1,16 +1,17 @@
 'use client';
 
-import { useEffect,useMemo,useState } from 'react';
+import { useCallback,useEffect,useMemo,useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { Bell,BellRing,CheckCheck,ChevronRight,Clock3,ShieldCheck } from 'lucide-react';
 import { apiRequest } from '@/lib/api-client';
 
 type Notice={id:string;category:string;title:string;body:string;action_url?:string|null;read_at?:string|null;created_at:string};
 function decodeKey(key:string){const value=key.replace(/-/g,'+').replace(/_/g,'/');const raw=atob(value+'='.repeat((4-value.length%4)%4));return Uint8Array.from(raw,c=>c.charCodeAt(0))}
 
-export default function NotificationsPage(){const [items,setItems]=useState<Notice[]>([]);const [filter,setFilter]=useState('ALL');const [busy,setBusy]=useState(false);const [message,setMessage]=useState('');const [error,setError]=useState('');const [pushEnabled,setPushEnabled]=useState(false);
- async function load(){const response=await apiRequest('/notifications');if(response.status===401){window.location.assign('/login?next=%2Fnotifications');return}const data=await response.json();if(!response.ok)throw new Error(data.message||'Notifications could not be loaded.');setItems(data.notifications||[])}
- useEffect(()=>{load().catch(e=>setError(e instanceof Error?e.message:'Notification service unavailable.'));if('serviceWorker'in navigator&&'PushManager'in window)navigator.serviceWorker.ready.then(reg=>reg.pushManager.getSubscription()).then(sub=>setPushEnabled(Boolean(sub))).catch(()=>{})},[]);
+export default function NotificationsPage(){const router=useRouter();const [items,setItems]=useState<Notice[]>([]);const [filter,setFilter]=useState('ALL');const [busy,setBusy]=useState(false);const [message,setMessage]=useState('');const [error,setError]=useState('');const [pushEnabled,setPushEnabled]=useState(false);
+ const load=useCallback(async()=>{const response=await apiRequest('/notifications');if(response.status===401){router.replace('/login?next=%2Fnotifications');return}const data=await response.json();if(!response.ok)throw new Error(data.message||'Notifications could not be loaded.');setItems(data.notifications||[])},[router])
+ useEffect(()=>{load().catch(e=>setError(e instanceof Error?e.message:'Notification service unavailable.'));if('serviceWorker'in navigator&&'PushManager'in window)navigator.serviceWorker.ready.then(reg=>reg.pushManager.getSubscription()).then(sub=>setPushEnabled(Boolean(sub))).catch(()=>{})},[load]);
  const filtered=useMemo(()=>items.filter(item=>filter==='ALL'||item.category===filter),[items,filter]);const unread=items.filter(item=>!item.read_at).length;
  async function markOne(item:Notice){if(item.read_at)return;try{const response=await apiRequest(`/notifications/${item.id}/read`,{method:'PATCH'});if(!response.ok)throw new Error('Could not mark this notification as read.');setItems(current=>current.map(row=>row.id===item.id?{...row,read_at:new Date().toISOString()}:row))}catch(e){setError(e instanceof Error?e.message:'Update failed.')}}
  async function markAll(){try{const response=await apiRequest('/notifications/read-all',{method:'POST'});if(!response.ok)throw new Error('Could not update notifications.');setItems(current=>current.map(row=>({...row,read_at:row.read_at||new Date().toISOString()})))}catch(e){setError(e instanceof Error?e.message:'Update failed.')}}

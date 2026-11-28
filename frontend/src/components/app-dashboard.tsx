@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { ArrowDownLeft, ArrowUpRight, Bell, BusFront, CircleHelp, Clock3, Compass, LogOut, MapPin, Package, ShieldCheck, Sparkles, Wallet, Smartphone, MessageCircle } from 'lucide-react';
 import { AccountProfile, apiRequest, signOut } from '@/lib/api-client';
 import { RiderModeSwitcher } from '@/components/rider-mode-switcher';
@@ -64,6 +64,7 @@ const nigerianStates=['AB','AD','AK','AN','BA','BY','BE','BO','CR','DE','EB','ED
 
 export function AppDashboard({ requiredRole }: { requiredRole?: string }) {
   const path = usePathname();
+  const router = useRouter();
   const [profile, setProfile] = useState<AccountProfile | null>(null);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [parks, setParks] = useState<Park[]>([]);
@@ -78,14 +79,14 @@ export function AppDashboard({ requiredRole }: { requiredRole?: string }) {
     (async () => {
       try {
         const response = await apiRequest('/me');
-        if (response.status === 401) { window.location.assign(`/login?next=${encodeURIComponent(path)}`); return; }
+        if (response.status === 401) { router.replace(`/login?next=${encodeURIComponent(path)}`); return; }
         const data = await response.json();
         if (!response.ok) throw new Error(data.message || 'We could not load your account.');
         if (!alive) return;
         setProfile(data as AccountProfile);
         const account = data as AccountProfile;
         const allowedForRoute = !requiredRole || account.active_role === requiredRole || account.roles.includes(requiredRole) || (requiredRole === 'BIKER' && account.biker_approved) || (requiredRole === 'DISPATCH_RIDER' && account.dispatch_approved);
-        if (!allowedForRoute) { window.location.replace(roleDestinations[account.active_role] || '/'); return; }
+        if (!allowedForRoute) { router.replace(roleDestinations[account.active_role] || '/'); return; }
         const ledger = await apiRequest('/wallet/transactions');
         if (ledger.ok) {
           const tx = await ledger.json();
@@ -103,11 +104,11 @@ export function AppDashboard({ requiredRole }: { requiredRole?: string }) {
       } finally { if (alive) setLoading(false); }
     })();
     return () => { alive = false; };
-  }, [path, requiredRole]);
+  }, [path, requiredRole, router]);
 
   async function handleSignOut() {
     await signOut();
-    window.location.assign('/');
+    router.replace('/');
   }
 
   async function updateGPSOptIn(enabled:boolean){if(enabled&&!window.confirm('Allow DE RIDE to use your location during active trips? You pay for the mobile data and battery used by GPS sharing.'))return;setGpsSaving(true);setError('');try{const response=await apiRequest('/me/preferences',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({gps_opt_in:enabled})});const result=await response.json();if(!response.ok)throw new Error(result.message||result.error||'Location setting could not be saved.');setProfile(current=>current?{...current,gps_opt_in:enabled}:current)}catch(e){setError(e instanceof Error?e.message:'Could not save location setting.')}finally{setGpsSaving(false)}}

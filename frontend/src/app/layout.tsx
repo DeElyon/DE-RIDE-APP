@@ -5,7 +5,10 @@ import { ServiceWorker } from './service-worker';
 import { ThemeMode } from '@/components/theme-mode';
 import { WorkspaceNavigation } from '@/components/workspace-navigation';
 import { LanguageProvider } from '@/components/language-provider';
+import { CookieConsent } from '@/components/cookie-consent';
+import { AmeboSupportWidget } from '@/components/amebo-support-widget';
 export const metadata: Metadata = {
+  metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'),
   title: 'DE RIDE — Move with confidence',
   description: 'Bus travel, bike rides and parcel dispatch across Nigeria. Find live parks and book your next ride.',
   manifest: '/manifest.json',
@@ -14,4 +17,4 @@ export const metadata: Metadata = {
   twitter: { card: 'summary_large_image', title: 'DE RIDE', description: 'Move with confidence across Nigeria.', images: ['/icons/1794927085562.jpg'] },
 };
 export const viewport: Viewport = { width: 'device-width', initialScale: 1, viewportFit: 'cover', themeColor: '#1B2428' };
-export default function RootLayout({children}:{children:React.ReactNode}) { return <html lang="en"><body><LanguageProvider><ServiceWorker /><ThemeMode /><WorkspaceNavigation />{children}</LanguageProvider></body></html>; }
+export default function RootLayout({children}:{children:React.ReactNode}) { return <html lang="en"><body><LanguageProvider><ServiceWorker /><ThemeMode /><WorkspaceNavigation />{children}<AmeboSupportWidget /><CookieConsent /></LanguageProvider></body></html>; }

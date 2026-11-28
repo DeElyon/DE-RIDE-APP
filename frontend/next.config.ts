@@ -11,6 +11,7 @@ if (envFile) loadDotenv({ path: envFile, override: false });
 
 const config: NextConfig = {
   reactStrictMode: true,
+  turbopack: { root: repoRoot },
   experimental: { cpus: 2 },
 };
 export default config;

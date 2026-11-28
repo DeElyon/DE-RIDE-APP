@@ -1,3 +1,5 @@
+import { friendlyError } from '@/lib/error-messages';
+
 const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8080/api/v1').replace(/\/$/, '');
 let refreshInFlight: Promise<string | null> | null = null;
 
@@ -44,6 +46,17 @@ export async function apiRequest(path: string, init: RequestInit = {}): Promise<
   if (response.status === 401 && path !== '/auth/refresh') {
     const rotated = await rotateAccessToken();
     if (rotated) { headers.set('Authorization', `Bearer ${rotated}`); response = await fetch(`${API_BASE}${path}`, { ...init, cache: init.cache ?? 'no-store', headers }); }
+  }
+  if (!response.ok && response.headers.get('content-type')?.includes('application/json')) {
+    const payload = await response.clone().json().catch(() => null) as { error?: unknown; message?: unknown } | null;
+    if (payload && typeof payload === 'object') {
+      const raw = typeof payload.error === 'string' ? payload.error : payload.message;
+      payload.message = friendlyError(raw, response.status >= 500 ? 'DE RIDE is having a moment. Please try again shortly.' : 'We couldn’t complete that request. Check the details and try again.');
+      const responseHeaders = new Headers(response.headers);
+      responseHeaders.delete('content-length');
+      responseHeaders.delete('content-encoding');
+      return new Response(JSON.stringify(payload), { status: response.status, statusText: response.statusText, headers: responseHeaders });
+    }
   }
   return response;
 }

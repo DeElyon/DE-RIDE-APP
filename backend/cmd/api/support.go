@@ -302,6 +302,29 @@ func registerSupportRoutes(secure fiber.Router, db *pgxpool.Pool) {
 		}
 		return c.Status(201).JSON(fiber.Map{"id": id, "status": "OPEN"})
 	})
+	secure.Get("/disputes", func(c *fiber.Ctx) error {
+		me := c.Locals("identity").(identity)
+		rows, err := db.Query(c.UserContext(), `SELECT id,payment_intent_id,escalation_id,reason,status,resolution,created_at,resolved_at FROM disputes WHERE opened_by=$1 ORDER BY created_at DESC LIMIT 100`, me.UserID)
+		if err != nil {
+			return c.Status(503).JSON(errJSON("ERR_DISPUTES_UNAVAILABLE"))
+		}
+		defer rows.Close()
+		items := make([]fiber.Map, 0)
+		for rows.Next() {
+			var id, reason, status string
+			var paymentIntentID, escalationID, resolution *string
+			var createdAt time.Time
+			var resolvedAt *time.Time
+			if err = rows.Scan(&id, &paymentIntentID, &escalationID, &reason, &status, &resolution, &createdAt, &resolvedAt); err != nil {
+				return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
+			}
+			items = append(items, fiber.Map{"id": id, "payment_intent_id": paymentIntentID, "escalation_id": escalationID, "reason": reason, "status": status, "resolution": resolution, "created_at": createdAt, "resolved_at": resolvedAt})
+		}
+		if err = rows.Err(); err != nil {
+			return c.Status(500).JSON(errJSON("ERR_DATABASE_QUERY"))
+		}
+		return c.JSON(fiber.Map{"disputes": items})
+	})
 	secure.Get("/admin/disputes", func(c *fiber.Ctx) error {
 		me := c.Locals("identity").(identity)
 		if me.Role != "ADMIN" {

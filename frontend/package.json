@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint",
+    "lint": "eslint .",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -17,7 +17,7 @@
     "jose": "^6.2.18",
     "lucide-react": "^1.78.0",
     "maplibre-gl": "^6.19.0",
-    "next": "15.1.11",
+    "next": "^16.4.6",
     "qrcode": "^1.5.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
@@ -27,9 +27,12 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "autoprefixer": "^10.7.0",
-    "eslint": "^8.57.1",
-    "eslint-config-next": "^15.1.6",
+    "eslint": "^10.16.0",
+    "eslint-config-next": "^16.4.6",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.2"
+  },
+  "allowScripts": {
+    "sharp@0.33.5": true
   }
 }

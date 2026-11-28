@@ -13,11 +13,12 @@ export function ParkMap({ parks, origin, destination, onReverse }: { parks: Park
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const onReverseRef = useRef(onReverse);
-  onReverseRef.current = onReverse;
   const markersRef = useRef<MapLibreMarker[]>([]);
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState('');
   const [reverseLoading, setReverseLoading] = useState(false);
+
+  useEffect(() => { onReverseRef.current = onReverse; }, [onReverse]);
 
   useEffect(() => {
     let cancelled = false;
