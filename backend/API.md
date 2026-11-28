@@ -30,4 +30,6 @@ For media uploads, configure a signed Cloudinary upload preset with strict 5 MB 
 
 For payments, configure `PAYSTACK_SECRET_KEY`, webhook signing secrets, `QR_PRIVATE_KEY_PEM`, and `QR_KEY_ID`. The webhook handler authenticates the raw request body, records the event, acknowledges it, and uses a retryable worker; the worker verifies each transaction with Paystack before crediting the wallet or confirming a ticket. Never trust a browser callback as proof of payment.
 
+Set `PUBLIC_FRONTEND_URL` to the HTTPS origin of the deployed Next.js app. All Paystack intents return to `{PUBLIC_FRONTEND_URL}/payment/callback`, where the signed-in customer session calls `GET /api/v1/payments/verify?reference=...` before showing success. Set this webhook URL in Paystack Dashboard → Developers → API configuration: `https://de-ride-app.onrender.com/api/v1/webhooks/paystack`. Configure the Paystack webhook signing secret in `PAYSTACK_WEBHOOK_SECRET`; keep Paystack secrets only in the backend environment. The callback is a customer redirect, while the webhook is a server-to-server event endpoint.
+
 The process-local WebSocket hub and in-memory cooldown/cache are per instance. Run a single API instance until shared realtime/cache infrastructure is intentionally introduced. Financial and KYC records remain durable in Neon Postgres.

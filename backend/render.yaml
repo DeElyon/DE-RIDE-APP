@@ -24,6 +24,14 @@ services:
         sync: false
       - key: SMTP_PASS
         sync: false
+      - key: PUBLIC_FRONTEND_URL
+        sync: false
+      - key: PAYSTACK_SECRET_KEY
+        sync: false
+      - key: PAYSTACK_WEBHOOK_SECRET
+        sync: false
+      - key: PAYSTACK_WEBHOOK_SECRETS
+        sync: false
       - key: QR_PRIVATE_KEY_PEM
         sync: false
       - key: QR_PUBLIC_KEY_PEM

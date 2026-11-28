@@ -346,11 +346,7 @@ func createWalletFundingIntent(ctx context.Context, db *pgxpool.Pool, userID, em
 	if err = tx.Commit(ctx); err != nil {
 		return "", "", "", "", "", err
 	}
-	frontendURL := strings.TrimRight(os.Getenv("PUBLIC_FRONTEND_URL"), "/")
-	if frontendURL == "" {
-		frontendURL = "http://localhost:3000"
-	}
-	callback := frontendURL + "/wallet?payment=return"
+	callback := paystackCallbackURL()
 	requestBody, _ := json.Marshal(map[string]any{"email": email, "amount": amountKobo, "reference": reference, "currency": "NGN", "callback_url": callback, "metadata": map[string]any{"intent_id": intentID, "purpose": "WALLET_FUNDING", "user_id": userID}})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.paystack.co/transaction/initialize", strings.NewReader(string(requestBody)))
 	if err != nil {
@@ -384,23 +380,7 @@ func initializeExistingPaystackIntent(ctx context.Context, db *pgxpool.Pool, int
 	if status != "CREATED" && status != "PENDING" {
 		return "", "", fmt.Errorf("payment intent is not initializable")
 	}
-	frontend := strings.TrimRight(os.Getenv("PUBLIC_FRONTEND_URL"), "/")
-	if frontend == "" {
-		frontend = "http://localhost:3000"
-	}
-	callback := frontend + "/wallet?payment=return"
-	switch purpose {
-	case "TICKET_CHECKOUT":
-		callback = frontend + "/tickets?payment=return"
-	case "SUBSCRIPTION":
-		callback = frontend + "/subscriptions?payment=return"
-	case "AMEBO_TOKENS":
-		callback = frontend + "/amebo?payment=return"
-	case "VTU_DATA":
-		callback = frontend + "/data?payment=return"
-	case "RIDER_ORDER":
-		callback = frontend + "/mobility?payment=return"
-	}
+	callback := paystackCallbackURL()
 	body, _ := json.Marshal(map[string]any{"email": email, "amount": amountKobo, "reference": reference, "currency": "NGN", "callback_url": callback, "metadata": map[string]any{"intent_id": intentID, "purpose": purpose, "user_id": userID}})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.paystack.co/transaction/initialize", strings.NewReader(string(body)))
 	if err != nil {
@@ -432,6 +412,14 @@ func initializeExistingPaystackIntent(ctx context.Context, db *pgxpool.Pool, int
 	}
 	_, err = db.Exec(ctx, `UPDATE payment_intents SET status='PENDING',authorization_url=$1,access_code=$2,expires_at=now()+interval '30 minutes',updated_at=now() WHERE id=$3 AND status IN ('CREATED','PENDING')`, provider.Data.AuthorizationURL, provider.Data.AccessCode, intentID)
 	return provider.Data.AuthorizationURL, provider.Data.AccessCode, err
+}
+
+func paystackCallbackURL() string {
+	frontend := strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_FRONTEND_URL")), "/")
+	if frontend == "" {
+		frontend = "http://localhost:3000"
+	}
+	return frontend + "/payment/callback"
 }
 
 func createPurposePaystackIntent(ctx context.Context, db *pgxpool.Pool, userID, email, intentType, key string, amountKobo int64, metadata map[string]any) (string, string, string, string, error) {
